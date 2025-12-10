@@ -3,29 +3,61 @@
 """
 import json
 import time
+import os
 from qdrant_client import QdrantClient
 from qdrant_client.http import models
 from sentence_transformers import SentenceTransformer
 import logging
+from dotenv import load_dotenv
 
+load_dotenv()
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 class QdrantSetup:
-    def __init__(self, host="localhost", port=6333):
-        self.client = QdrantClient(host=host, port=port)
+    def __init__(self, host=None, port=None, url=None, api_key=None):
+        # Читаем параметры из переменных окружения, если не переданы явно
+        qdrant_url = url or os.getenv('QDRANT_URL')
+        qdrant_host = host or os.getenv('QDRANT_HOST', 'localhost')
+        qdrant_port = port or int(os.getenv('QDRANT_PORT', '6333'))
+        qdrant_api_key = api_key or os.getenv('QDRANT_API_KEY')
+        
+        # Для облачного Qdrant используем URL и API ключ
+        if qdrant_url:
+            logger.info(f"Подключение к облачному Qdrant: {qdrant_url}")
+            if qdrant_api_key:
+                self.client = QdrantClient(
+                    url=qdrant_url, 
+                    api_key=qdrant_api_key,
+                    check_compatibility=False
+                )
+            else:
+                self.client = QdrantClient(url=qdrant_url, check_compatibility=False)
+        else:
+            # Для локального Qdrant используем host и port
+            logger.info(f"Подключение к локальному Qdrant: {qdrant_host}:{qdrant_port}")
+            self.client = QdrantClient(host=qdrant_host, port=qdrant_port)
+        
         self.embedder = SentenceTransformer('intfloat/multilingual-e5-small')
         
     def create_collection(self, collection_name="test_recipes"):
         """Создание коллекции с нужной схемой"""
         
         # Проверяем, существует ли коллекция
-        collections = self.client.get_collections()
-        existing = any(c.name == collection_name for c in collections.collections)
-        
-        if existing:
-            logger.info(f"Коллекция {collection_name} уже существует")
-            return True
+        try:
+            collections = self.client.get_collections()
+            existing = any(c.name == collection_name for c in collections.collections)
+            
+            if existing:
+                logger.info(f"Коллекция {collection_name} уже существует")
+                return True
+        except Exception as e:
+            logger.error(f"Ошибка при проверке коллекций: {e}")
+            # Если нет прав на чтение коллекций, пробуем создать напрямую
+            if "403" in str(e) or "forbidden" in str(e).lower():
+                logger.warning("Нет прав на чтение списка коллекций. Пробуем создать коллекцию...")
+            else:
+                raise
         
         # Создаем новую коллекцию
         try:
@@ -164,29 +196,56 @@ class QdrantSetup:
             return False
 
 if __name__ == "__main__":
-    print("🚀 Настройка тестовой среды Qdrant")
+    import sys
+    
+    print("🚀 Проверка подключения к Qdrant")
     print("=" * 50)
+    
+    collection_name = os.getenv('COLLECTION_NAME', 'distill_hybrid')
     
     setup = QdrantSetup()
     
-    # 1. Создаем коллекцию
-    print("\n1. Создание коллекции...")
-    if not setup.create_collection():
-        print("❌ Не удалось создать коллекцию")
-        exit(1)
-    
-    # 2. Загружаем данные
-    print("\n2. Загрузка данных...")
-    if not setup.upload_data():
-        print("❌ Не удалось загрузить данные")
-        exit(1)
-    
-    # 3. Проверяем загрузку
-    print("\n3. Проверка загрузки...")
-    if setup.verify_upload():
-        print("✅ Настройка завершена успешно!")
-    else:
-        print("⚠️ Настройка завершена с предупреждениями")
-    
-    print("\nДля запуска тестов выполните: python qdrant_test_scripts/test_runner.py")
-    print("Для запуска дашборда выполните: streamlit run streamlit_dashboard/test_dashboard.py")
+    # Проверяем подключение и коллекцию
+    print(f"\n1. Проверка подключения к коллекции '{collection_name}'...")
+    try:
+        # Пытаемся получить информацию о коллекции напрямую
+        collection_info = setup.client.get_collection(collection_name)
+        count = setup.client.count(collection_name=collection_name).count
+        
+        print(f"✅ Коллекция '{collection_name}' найдена! Содержит {count} точек")
+        
+        # Получаем информацию о коллекции
+        print(f"\n📊 Информация о коллекции:")
+        print(f"   - Векторов: {collection_info.indexed_vectors_count}")
+        print(f"   - Точек: {collection_info.points_count}")
+        print(f"   - Статус: {collection_info.status}")
+        
+        if collection_info.config.params.vectors:
+            if hasattr(collection_info.config.params.vectors, 'dense'):
+                dense = collection_info.config.params.vectors.dense
+                print(f"   - Размер dense вектора: {dense.size}")
+                print(f"   - Расстояние: {dense.distance}")
+        
+        print("\n✅ Подключение успешно! Коллекция готова к использованию.")
+        print("\nДля запуска тестов выполните: python qdrant_test_scripts/test-runner.py")
+        print("Для запуска дашборда выполните: streamlit run streamlit_dashboard/test-dashboard.py")
+            
+    except Exception as e:
+        error_msg = str(e)
+        if "403" in error_msg or "forbidden" in error_msg.lower():
+            print(f"⚠️  Ошибка доступа (403 Forbidden)")
+            print(f"   Возможно, API ключ имеет ограниченные права доступа.")
+            print(f"   Попробуем проверить подключение другим способом...")
+            try:
+                # Пробуем выполнить простой поиск для проверки доступа
+                test_result = setup.client.scroll(collection_name=collection_name, limit=1)
+                print(f"✅ Подключение работает! Можно выполнять поиск в коллекции '{collection_name}'")
+                print("\nДля запуска тестов выполните: python qdrant_test_scripts/test-runner.py")
+                print("Для запуска дашборда выполните: streamlit run streamlit_dashboard/test-dashboard.py")
+            except Exception as e2:
+                print(f"❌ Ошибка подключения: {e2}")
+                print(f"   Проверьте правильность API ключа и прав доступа.")
+                sys.exit(1)
+        else:
+            print(f"❌ Ошибка подключения: {e}")
+            sys.exit(1)

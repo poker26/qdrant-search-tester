@@ -3,11 +3,15 @@
 """
 import asyncio
 import json
+import os
 from dataclasses import dataclass
 from typing import List, Dict, Any
 from qdrant_client import QdrantClient
 from sentence_transformers import SentenceTransformer
 import pandas as pd
+from dotenv import load_dotenv
+
+load_dotenv()
 
 @dataclass
 class TestCase:
@@ -20,9 +24,28 @@ class TestCase:
     min_score_threshold: float = 0.3  # Минимальный порог релевантности
 
 class QdrantTester:
-    def __init__(self, host="localhost", port=6333, collection_name="test_recipes"):
-        self.client = QdrantClient(host=host, port=port)
-        self.collection_name = collection_name
+    def __init__(self, host=None, port=None, url=None, api_key=None, collection_name=None):
+        # Читаем параметры из переменных окружения, если не переданы явно
+        qdrant_url = url or os.getenv('QDRANT_URL')
+        qdrant_host = host or os.getenv('QDRANT_HOST', 'localhost')
+        qdrant_port = port or int(os.getenv('QDRANT_PORT', '6333'))
+        qdrant_api_key = api_key or os.getenv('QDRANT_API_KEY')
+        self.collection_name = collection_name or os.getenv('COLLECTION_NAME', 'distill_hybrid')
+        
+        # Для облачного Qdrant используем URL и API ключ
+        if qdrant_url:
+            if qdrant_api_key:
+                self.client = QdrantClient(
+                    url=qdrant_url, 
+                    api_key=qdrant_api_key,
+                    check_compatibility=False
+                )
+            else:
+                self.client = QdrantClient(url=qdrant_url, check_compatibility=False)
+        else:
+            # Для локального Qdrant используем host и port
+            self.client = QdrantClient(host=qdrant_host, port=qdrant_port)
+        
         self.embedder = SentenceTransformer('intfloat/multilingual-e5-small')
         
         # Загружаем тест-кейсы

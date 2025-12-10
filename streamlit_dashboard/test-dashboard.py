@@ -8,6 +8,10 @@ from qdrant_client import QdrantClient
 from sentence_transformers import SentenceTransformer
 import json
 import time
+import os
+from dotenv import load_dotenv
+
+load_dotenv()
 
 # Настройки страницы
 st.set_page_config(
@@ -20,7 +24,22 @@ st.set_page_config(
 # Инициализация клиентов
 @st.cache_resource
 def init_qdrant_client():
-    return QdrantClient(host="localhost", port=6333)
+    qdrant_url = os.getenv('QDRANT_URL')
+    qdrant_host = os.getenv('QDRANT_HOST', 'localhost')
+    qdrant_port = int(os.getenv('QDRANT_PORT', '6333'))
+    qdrant_api_key = os.getenv('QDRANT_API_KEY')
+    
+    if qdrant_url:
+        if qdrant_api_key:
+            return QdrantClient(
+                url=qdrant_url, 
+                api_key=qdrant_api_key,
+                check_compatibility=False
+            )
+        else:
+            return QdrantClient(url=qdrant_url, check_compatibility=False)
+    else:
+        return QdrantClient(host=qdrant_host, port=qdrant_port)
 
 @st.cache_resource
 def init_embedder():
@@ -59,10 +78,20 @@ st.markdown("---")
 with st.sidebar:
     st.header("⚙️ Настройки поиска")
     
+    # Получаем список коллекций
+    try:
+        collections = client.get_collections()
+        collection_names = [c.name for c in collections.collections]
+        default_collection = os.getenv('COLLECTION_NAME', 'distill_hybrid')
+        default_index = collection_names.index(default_collection) if default_collection in collection_names else 0
+    except:
+        collection_names = ["distill_hybrid"]
+        default_index = 0
+    
     collection_name = st.selectbox(
         "Коллекция:",
-        ["test_recipes", "recipes"],
-        index=0
+        collection_names,
+        index=default_index
     )
     
     search_type = st.radio(
