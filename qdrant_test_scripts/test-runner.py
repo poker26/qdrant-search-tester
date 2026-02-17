@@ -1,17 +1,20 @@
 """
-Автоматические тесты для проверки поиска в Qdrant
+Автоматические тесты для проверки поиска в Qdrant.
+Использует OpenAI text-embedding-3-small для эмбеддингов.
 """
-import asyncio
 import json
 import os
 from dataclasses import dataclass
 from typing import List, Dict, Any
 from qdrant_client import QdrantClient
-from sentence_transformers import SentenceTransformer
+from qdrant_client.http import models
 import pandas as pd
 from dotenv import load_dotenv
 
 load_dotenv()
+
+OPENAI_EMBEDDING_MODEL = "text-embedding-3-small"
+
 
 @dataclass
 class TestCase:
@@ -25,14 +28,12 @@ class TestCase:
 
 class QdrantTester:
     def __init__(self, host=None, port=None, url=None, api_key=None, collection_name=None):
-        # Читаем параметры из переменных окружения, если не переданы явно
         qdrant_url = url or os.getenv('QDRANT_URL')
         qdrant_host = host or os.getenv('QDRANT_HOST', 'localhost')
         qdrant_port = port or int(os.getenv('QDRANT_PORT', '6333'))
         qdrant_api_key = api_key or os.getenv('QDRANT_API_KEY')
         self.collection_name = collection_name or os.getenv('COLLECTION_NAME', 'distill_hybrid')
         
-        # Для облачного Qdrant используем URL и API ключ
         if qdrant_url:
             if qdrant_api_key:
                 self.client = QdrantClient(
@@ -43,12 +44,16 @@ class QdrantTester:
             else:
                 self.client = QdrantClient(url=qdrant_url, check_compatibility=False)
         else:
-            # Для локального Qdrant используем host и port
             self.client = QdrantClient(host=qdrant_host, port=qdrant_port)
-        
-        self.embedder = SentenceTransformer('intfloat/multilingual-e5-small')
-        
-        # Загружаем тест-кейсы
+
+        openai_api_key = os.getenv('OPENAI_API_KEY')
+        if not openai_api_key:
+            raise ValueError(
+                "OPENAI_API_KEY не задан. Укажите ключ в .env или переменных окружения."
+            )
+        from openai import OpenAI
+        self.openai_client = OpenAI(api_key=openai_api_key)
+
         self.test_cases = self.load_test_cases()
     
     def load_test_cases(self) -> List[TestCase]:
@@ -97,18 +102,22 @@ class QdrantTester:
         results = []
         
         for query in test_case.test_queries:
-            # Создаем эмбеддинг для запроса
-            query_embedding = self.embedder.encode(query).tolist()
+            response = self.openai_client.embeddings.create(
+                model=OPENAI_EMBEDDING_MODEL,
+                input=query
+            )
+            query_embedding = response.data[0].embedding
             
-            # Выполняем поиск
             search_result = self.client.search(
                 collection_name=self.collection_name,
-                query_vector=query_embedding,
+                query_vector=models.NamedVector(
+                    name="dense",
+                    vector=query_embedding
+                ),
                 limit=10,
                 with_payload=True
             )
             
-            # Ищем наш рецепт в результатах
             found_rank = None
             found_score = 0.0
             
@@ -118,7 +127,6 @@ class QdrantTester:
                     found_score = hit.score
                     break
             
-            # Определяем статус теста
             if found_rank is None:
                 status = "FAILED"
                 message = f"Рецепт не найден в топ-10"
@@ -130,7 +138,7 @@ class QdrantTester:
                 message = f"Низкий score: {found_score:.3f} (минимум {test_case.min_score_threshold})"
             else:
                 status = "PASSED"
-                message = f"✓ Найден на позиции {found_rank} (score: {found_score:.3f})"
+                message = f"Найден на позиции {found_rank} (score: {found_score:.3f})"
             
             results.append({
                 "query": query,
@@ -164,7 +172,7 @@ class QdrantTester:
     
     def run_all_tests(self) -> Dict[str, Any]:
         """Запуск всех тестов"""
-        print("🧪 Запуск автоматических тестов поиска в Qdrant")
+        print("Запуск автоматических тестов поиска в Qdrant")
         print("=" * 60)
         
         all_results = []
@@ -176,47 +184,36 @@ class QdrantTester:
         }
         
         for test_case in self.test_cases:
-            print(f"\n📋 Тестируем: {test_case.recipe_name}")
+            print(f"\nТестируем: {test_case.recipe_name}")
             print("-" * 40)
             
             result = self.run_single_test(test_case)
             all_results.append(result)
             
-            # Выводим результаты в консоль
             for res in result['results']:
-                status_icon = "✅" if res['status'] == 'PASSED' else "⚠️" if res['status'] == 'WARNING' else "❌"
-                print(f"{status_icon} Запрос: '{res['query']}'")
+                status_icon = "OK" if res['status'] == 'PASSED' else "WARN" if res['status'] == 'WARNING' else "FAIL"
+                print(f"[{status_icon}] Запрос: '{res['query']}'")
                 print(f"   Результат: {res['message']}")
             
-            # Обновляем статистику
             summary['total_tests'] += result['summary']['total_queries']
             summary['total_passed'] += result['summary']['passed']
             summary['total_warning'] += result['summary']['warning']
             summary['total_failed'] += result['summary']['failed']
             
-            print(f"\n📊 Итог по рецепту: {result['summary']['success_rate']} успешных запросов")
+            print(f"\nИтог по рецепту: {result['summary']['success_rate']} успешных запросов")
         
-        # Генерируем финальный отчет
         print("\n" + "=" * 60)
-        print("📈 ФИНАЛЬНЫЙ ОТЧЕТ")
+        print("ФИНАЛЬНЫЙ ОТЧЕТ")
         print("=" * 60)
         
         success_rate = (summary['total_passed'] / summary['total_tests'] * 100) if summary['total_tests'] > 0 else 0
         
         print(f"Всего тестов: {summary['total_tests']}")
-        print(f"✅ Успешно: {summary['total_passed']}")
-        print(f"⚠️  С предупреждениями: {summary['total_warning']}")
-        print(f"❌ Неудачно: {summary['total_failed']}")
-        print(f"📊 Общий успех: {success_rate:.1f}%")
+        print(f"Успешно: {summary['total_passed']}")
+        print(f"С предупреждениями: {summary['total_warning']}")
+        print(f"Неудачно: {summary['total_failed']}")
+        print(f"Общий успех: {success_rate:.1f}%")
         
-        if success_rate >= 80:
-            print("\n🎉 Отличные результаты! Поиск работает корректно.")
-        elif success_rate >= 60:
-            print("\n👍 Удовлетворительные результаты. Возможны небольшие улучшения.")
-        else:
-            print("\n⚠️  Требуется настройка поиска. Результаты ниже ожидаемых.")
-        
-        # Сохраняем отчет в файл
         self.save_report(all_results, summary)
         
         return {
@@ -231,7 +228,6 @@ class QdrantTester:
         
         timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
         
-        # Сохраняем детальный отчет в JSON
         report_data = {
             "timestamp": timestamp,
             "summary": summary,
@@ -241,7 +237,6 @@ class QdrantTester:
         with open(f'test_report_{timestamp}.json', 'w', encoding='utf-8') as f:
             json.dump(report_data, f, ensure_ascii=False, indent=2)
         
-        # Создаем CSV для удобного просмотра
         csv_data = []
         for recipe_result in results:
             for query_result in recipe_result['results']:
@@ -258,9 +253,7 @@ class QdrantTester:
         df = pd.DataFrame(csv_data)
         df.to_csv(f'test_report_{timestamp}.csv', index=False, encoding='utf-8')
         
-        print(f"\n📁 Отчеты сохранены:")
-        print(f"   - test_report_{timestamp}.json (полный отчет)")
-        print(f"   - test_report_{timestamp}.csv (табличный формат)")
+        print(f"\nОтчеты сохранены: test_report_{timestamp}.json, test_report_{timestamp}.csv")
 
 if __name__ == "__main__":
     tester = QdrantTester()

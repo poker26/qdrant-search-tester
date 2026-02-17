@@ -30,7 +30,8 @@ services:
     environment:
       - QDRANT_HOST=qdrant
       - QDRANT_PORT=6333
-      - EMBEDDING_MODEL=intfloat/multilingual-e5-small
+      - EMBEDDING_MODEL=openai
+      - COLLECTION_VECTOR_SIZE=1536
     volumes:
       - ./data:/app/data
       - ./reports:/app/reports

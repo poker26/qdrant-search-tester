@@ -130,13 +130,15 @@ QDRANT_PORT=6333
 QDRANT_API_KEY=
 
 # Collection Settings
-COLLECTION_NAME=test_recipes
-COLLECTION_VECTOR_SIZE=384
+COLLECTION_NAME=distill_hybrid
+COLLECTION_VECTOR_SIZE=1536
 COLLECTION_DISTANCE=COSINE
 
+# OpenAI (обязательно для эмбеддингов)
+OPENAI_API_KEY=
+
 # Embedding Model
-EMBEDDING_MODEL=intfloat/multilingual-e5-small
-EMBEDDING_DEVICE=cpu  # cpu or cuda
+EMBEDDING_MODEL=openai
 
 # Test Settings
 MAX_ALLOWED_RANK=3
