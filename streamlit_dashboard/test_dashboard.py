@@ -220,18 +220,33 @@ with tab1:
                 if query_embedding is None:
                     st.error("Не удалось создать эмбеддинг. Проверьте OPENAI_API_KEY.")
                 else:
-                    # Выполняем поиск (коллекция с dense-вектором)
-                    # query_points: query — вектор, using — имя вектора для коллекций с named vectors
+                    # Выполняем поиск
+                    # Сначала пробуем с using="dense", при ошибке — без using (default vector)
                     start_time = time.time()
-                    query_response = client.query_points(
-                        collection_name=collection_name,
-                        query=query_embedding,
-                        using="dense",
-                        limit=limit_results,
-                        score_threshold=score_threshold,
-                        with_payload=True,
-                        with_vectors=show_embeddings
-                    )
+                    try:
+                        query_response = client.query_points(
+                            collection_name=collection_name,
+                            query=query_embedding,
+                            using="dense",
+                            limit=limit_results,
+                            score_threshold=score_threshold,
+                            with_payload=True,
+                            with_vectors=show_embeddings
+                        )
+                    except Exception as vec_err:
+                        err_msg = str(vec_err).lower()
+                        if "dense" in err_msg and ("not existing" in err_msg or "vector name" in err_msg):
+                            # Коллекция с default-вектором (без имени)
+                            query_response = client.query_points(
+                                collection_name=collection_name,
+                                query=query_embedding,
+                                limit=limit_results,
+                                score_threshold=score_threshold,
+                                with_payload=True,
+                                with_vectors=show_embeddings
+                            )
+                        else:
+                            raise
                     results = query_response.points
                     search_time = time.time() - start_time
                     
