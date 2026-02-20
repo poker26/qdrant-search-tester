@@ -375,52 +375,212 @@ with tab2:
 with tab3:
     st.header("Автоматические тесты")
     
-    if st.button("🚀 Запустить все тесты", type="primary"):
-        with st.spinner("Выполняю тесты..."):
-            # Импортируем и запускаем тестер (файл test-runner.py — через importlib)
-            import os
-            import importlib.util
-            base_dir = os.path.dirname(os.path.abspath(__file__))
-            for rel in ['../qdrant_test_scripts', '../qdrant-search-tester/qdrant_test_scripts']:
-                runner_path = os.path.normpath(os.path.join(base_dir, rel, 'test-runner.py'))
-                if os.path.isfile(runner_path):
-                    break
-            else:
-                runner_path = os.path.normpath(os.path.join(base_dir, '..', 'qdrant_test_scripts', 'test-runner.py'))
+    # Подразделы для управления тестами
+    test_tab1, test_tab2 = st.tabs(["📋 Управление тестами", "▶️ Запуск тестов"])
+    
+    with test_tab1:
+        st.subheader("Создание и редактирование тестов")
+        
+        # Импортируем менеджер тестов
+        import sys
+        import os
+        base_dir = os.path.dirname(os.path.abspath(__file__))
+        sys.path.insert(0, os.path.join(base_dir, '..'))
+        
+        try:
+            from test_manager import TestManager, TestCase
+            from datetime import datetime
             
-            try:
-                spec = importlib.util.spec_from_file_location("test_runner", runner_path)
-                test_runner = importlib.util.module_from_spec(spec)
-                spec.loader.exec_module(test_runner)
-                QdrantTester = test_runner.QdrantTester
-                tester = QdrantTester()
-                results = tester.run_all_tests()
-                
-                # Отображаем результаты
-                st.success("Тесты завершены!")
-                
-                # Сводка
-                summary = results['summary']
-                col1, col2, col3, col4 = st.columns(4)
-                with col1:
-                    st.metric("Всего тестов", summary['total_tests'])
-                with col2:
-                    st.metric("Успешно", summary['total_passed'])
-                with col3:
-                    st.metric("С предупреждениями", summary['total_warning'])
-                with col4:
-                    st.metric("Неудачно", summary['total_failed'])
-                
-                # Детальные результаты
-                for recipe_result in results['detailed_results']:
-                    with st.expander(f"{recipe_result['recipe_name']} - {recipe_result['summary']['success_rate']}"):
-                        for query_result in recipe_result['results']:
-                            status_icon = "✅" if query_result['status'] == 'PASSED' else "⚠️" if query_result['status'] == 'WARNING' else "❌"
-                            st.write(f"{status_icon} **{query_result['query']}**")
-                            st.write(f"   {query_result['message']}")
+            tests_file = os.path.join(base_dir, '..', 'tests.json')
+            test_manager = TestManager(tests_file=tests_file)
+            
+            # Форма создания нового теста
+            with st.expander("➕ Создать новый тест", expanded=False):
+                with st.form("new_test_form"):
+                    test_name = st.text_input("Название теста*", placeholder="Например: Поиск рецепта водки из картофеля")
+                    test_query = st.text_area("Поисковый запрос*", placeholder="Введите запрос для тестирования поиска", height=100)
+                    col1, col2 = st.columns(2)
+                    with col1:
+                        expected_id = st.text_input("Ожидаемый ID результата", placeholder="vodka_potato_tech")
+                        max_rank = st.number_input("Максимальная позиция", min_value=1, max_value=20, value=3)
+                    with col2:
+                        expected_ids_str = st.text_input("Или список ID (через запятую)", placeholder="id1, id2, id3")
+                        min_score = st.number_input("Минимальный score", min_value=0.0, max_value=1.0, value=0.3, step=0.05)
+                    description = st.text_area("Описание (опционально)", placeholder="Дополнительная информация о тесте")
+                    
+                    submitted = st.form_submit_button("💾 Сохранить тест", type="primary")
+                    
+                    if submitted:
+                        if not test_name or not test_query:
+                            st.error("Пожалуйста, заполните название и запрос")
+                        else:
+                            expected_ids = None
+                            if expected_ids_str:
+                                expected_ids = [id.strip() for id in expected_ids_str.split(',') if id.strip()]
                             
-            except Exception as e:
-                st.error(f"Ошибка при выполнении тестов: {e}")
+                            new_test = TestCase(
+                                id="",
+                                name=test_name,
+                                query=test_query,
+                                expected_result_id=expected_id if expected_id else None,
+                                expected_result_ids=expected_ids if expected_ids else None,
+                                max_rank=max_rank,
+                                min_score=min_score,
+                                description=description
+                            )
+                            
+                            if test_manager.add_test(new_test):
+                                st.success(f"✅ Тест '{test_name}' успешно создан!")
+                                st.rerun()
+                            else:
+                                st.error("Ошибка: тест с таким ID уже существует")
+            
+            # Список существующих тестов
+            st.subheader("📝 Существующие тесты")
+            tests = test_manager.get_all_tests()
+            
+            if not tests:
+                st.info("Пока нет созданных тестов. Создайте первый тест выше.")
+            else:
+                for i, test in enumerate(tests):
+                    with st.expander(f"🔍 {test.name} (ID: {test.id})", expanded=False):
+                        col1, col2 = st.columns([3, 1])
+                        with col1:
+                            st.write(f"**Запрос:** {test.query}")
+                            if test.expected_result_id:
+                                st.write(f"**Ожидаемый ID:** `{test.expected_result_id}`")
+                            if test.expected_result_ids:
+                                st.write(f"**Ожидаемые ID:** {', '.join(test.expected_result_ids)}")
+                            st.write(f"**Макс. позиция:** {test.max_rank}, **Мин. score:** {test.min_score}")
+                            if test.description:
+                                st.write(f"**Описание:** {test.description}")
+                            if test.created_at:
+                                st.caption(f"Создан: {test.created_at}")
+                        with col2:
+                            if st.button("🗑️ Удалить", key=f"delete_{test.id}"):
+                                if test_manager.delete_test(test.id):
+                                    st.success("Тест удален")
+                                    st.rerun()
+                                else:
+                                    st.error("Ошибка при удалении")
+        
+        except ImportError as e:
+            st.error(f"Не удалось импортировать test_manager: {e}")
+            st.info("Убедитесь, что файл test_manager.py находится в корне проекта")
+        except Exception as e:
+            st.error(f"Ошибка при работе с тестами: {e}")
+            import traceback
+            st.code(traceback.format_exc())
+    
+    with test_tab2:
+        st.subheader("Запуск тестов")
+        
+        # Импортируем менеджер тестов для выбора
+        import sys
+        import os
+        base_dir = os.path.dirname(os.path.abspath(__file__))
+        sys.path.insert(0, os.path.join(base_dir, '..'))
+        
+        try:
+            from test_manager import TestManager
+            
+            tests_file = os.path.join(base_dir, '..', 'tests.json')
+            test_manager = TestManager(tests_file=tests_file)
+            all_tests = test_manager.get_all_tests()
+            
+            if not all_tests:
+                st.warning("⚠️ Нет созданных тестов. Перейдите на вкладку 'Управление тестами' для создания тестов.")
+            else:
+                # Выбор тестов для запуска
+                test_options = {f"{t.name} ({t.id})": t.id for t in all_tests}
+                selected_test_names = st.multiselect(
+                    "Выберите тесты для запуска (оставьте пустым для запуска всех):",
+                    options=list(test_options.keys()),
+                    default=[]
+                )
+                
+                selected_test_ids = [test_options[name] for name in selected_test_names] if selected_test_names else None
+                
+                col1, col2 = st.columns(2)
+                with col1:
+                    run_all = st.button("🚀 Запустить все тесты", type="primary", use_container_width=True)
+                with col2:
+                    run_selected = st.button("▶️ Запустить выбранные", type="secondary", use_container_width=True, disabled=not selected_test_ids)
+                
+                if run_all or run_selected:
+                    with st.spinner("Выполняю тесты..."):
+                        # Импортируем новый тестер
+                        import importlib.util
+                        runner_path = None
+                        for rel in ['../qdrant_test_scripts', '../qdrant-search-tester/qdrant_test_scripts']:
+                            candidate = os.path.normpath(os.path.join(base_dir, rel, 'test-runner-v2.py'))
+                            if os.path.isfile(candidate):
+                                runner_path = candidate
+                                break
+                        
+                        if not runner_path:
+                            runner_path = os.path.normpath(os.path.join(base_dir, '..', 'qdrant_test_scripts', 'test-runner-v2.py'))
+                        
+                        try:
+                            spec = importlib.util.spec_from_file_location("test_runner_v2", runner_path)
+                            test_runner_v2 = importlib.util.module_from_spec(spec)
+                            spec.loader.exec_module(test_runner_v2)
+                            QdrantTesterV2 = test_runner_v2.QdrantTesterV2
+                            
+                            tester = QdrantTesterV2(tests_file=tests_file)
+                            test_ids_to_run = selected_test_ids if run_selected else None
+                            results = tester.run_tests(test_ids=test_ids_to_run)
+                            
+                            # Отображаем результаты
+                            st.success("✅ Тесты завершены!")
+                            
+                            # Сводка
+                            summary = results['summary']
+                            col1, col2, col3, col4 = st.columns(4)
+                            with col1:
+                                st.metric("Всего тестов", summary['total_tests'])
+                            with col2:
+                                st.metric("Успешно", summary['total_passed'], delta=f"{results['success_rate']:.1f}%")
+                            with col3:
+                                st.metric("С предупреждениями", summary['total_warning'])
+                            with col4:
+                                st.metric("Неудачно", summary['total_failed'])
+                            
+                            # Детальные результаты
+                            st.subheader("📊 Детальные результаты")
+                            for result in results['detailed_results']:
+                                status_icon = "✅" if result['status'] == 'PASSED' else "⚠️" if result['status'] == 'WARNING' else "❌"
+                                with st.expander(f"{status_icon} {result['test_name']} - {result['status']}", expanded=False):
+                                    st.write(f"**Запрос:** {result['query']}")
+                                    st.write(f"**Результат:** {result['message']}")
+                                    st.write(f"**Позиция:** {result['rank']}, **Score:** {result['score']}")
+                                    if result['found_id'] != 'N/A':
+                                        st.write(f"**Найденный ID:** `{result['found_id']}`")
+                                    if result['expected_ids']:
+                                        st.write(f"**Ожидались ID:** {', '.join(result['expected_ids'])}")
+                                    
+                                    # Топ-5 результатов
+                                    if result['top_results']:
+                                        st.write("**Топ-5 результатов поиска:**")
+                                        top_df = pd.DataFrame(result['top_results'])
+                                        st.dataframe(top_df, use_container_width=True, hide_index=True)
+                                    
+                        except FileNotFoundError:
+                            st.error(f"❌ Файл test-runner-v2.py не найден по пути: {runner_path}")
+                            st.info("Убедитесь, что файл test-runner-v2.py находится в директории qdrant_test_scripts")
+                        except Exception as e:
+                            st.error(f"Ошибка при выполнении тестов: {e}")
+                            import traceback
+                            with st.expander("Детали ошибки"):
+                                st.code(traceback.format_exc())
+        
+        except ImportError as e:
+            st.error(f"Не удалось импортировать test_manager: {e}")
+            st.info("Убедитесь, что файл test_manager.py находится в корне проекта")
+        except Exception as e:
+            st.error(f"Ошибка при работе с тестами: {e}")
+            import traceback
+            st.code(traceback.format_exc())
 
 # Раздел "Данные" временно скрыт
 # with tab4:
