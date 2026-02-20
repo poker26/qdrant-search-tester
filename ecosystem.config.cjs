@@ -2,10 +2,42 @@ const path = require('path');
 const fs = require('fs');
 
 const rootDir = __dirname;
-const venvPython = path.join(rootDir, 'venv/bin/python');
-const venvPythonParent = path.join(rootDir, '..', 'venv/bin/python');
-const pythonPath = fs.existsSync(venvPython) ? venvPython : venvPythonParent;
-const cwd = fs.existsSync(venvPython) ? rootDir : path.join(rootDir, '..');
+const nestedDir = path.join(rootDir, 'qdrant-search-tester');
+
+// Ищем venv и streamlit_dashboard в разных возможных расположениях
+const candidates = [
+  { cwd: rootDir, venv: path.join(rootDir, 'venv/bin/python') },
+  { cwd: nestedDir, venv: path.join(nestedDir, 'venv/bin/python') },
+  { cwd: path.join(rootDir, '..'), venv: path.join(rootDir, '..', 'venv/bin/python') }
+];
+
+const dashboardPath = 'streamlit_dashboard/test_dashboard.py';
+let pythonPath = null;
+let cwd = rootDir;
+
+for (const { cwd: dir, venv } of candidates) {
+  const scriptPath = path.join(dir, dashboardPath);
+  if (fs.existsSync(venv) && fs.existsSync(scriptPath)) {
+    pythonPath = venv;
+    cwd = dir;
+    break;
+  }
+}
+
+if (!pythonPath) {
+  // Fallback: используем первый найденный venv
+  for (const { cwd: dir, venv } of candidates) {
+    if (fs.existsSync(venv)) {
+      pythonPath = venv;
+      cwd = fs.existsSync(path.join(dir, dashboardPath)) ? dir : rootDir;
+      break;
+    }
+  }
+}
+
+if (!pythonPath) {
+  pythonPath = path.join(rootDir, 'venv/bin/python');
+}
 
 module.exports = {
   apps: [
