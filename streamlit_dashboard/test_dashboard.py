@@ -5,7 +5,6 @@ import streamlit as st
 import pandas as pd
 import plotly.express as px
 from qdrant_client import QdrantClient
-from qdrant_client.http import models
 import json
 import time
 import os
@@ -222,11 +221,12 @@ with tab1:
                     st.error("Не удалось создать эмбеддинг. Проверьте OPENAI_API_KEY.")
                 else:
                     # Выполняем поиск (коллекция с dense-вектором)
-                    # Используем query_points — в новых версиях qdrant-client метод search заменён на query_points
+                    # query_points: query — вектор, using — имя вектора для коллекций с named vectors
                     start_time = time.time()
                     query_response = client.query_points(
                         collection_name=collection_name,
-                        query=models.NamedVector(name="dense", vector=query_embedding),
+                        query=query_embedding,
+                        using="dense",
                         limit=limit_results,
                         score_threshold=score_threshold,
                         with_payload=True,
