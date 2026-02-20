@@ -137,7 +137,7 @@ def get_recipes_data():
 # Инициализация при первом использовании
 client = get_client()
 embedder = get_embedder()
-recipes, recipes_df = get_recipes_data()
+# recipes, recipes_df = get_recipes_data()  # Временно отключено, раздел "Данные" скрыт
 
 # Заголовок
 st.title("🔍 Qdrant Search Test Dashboard")
@@ -192,7 +192,7 @@ with st.sidebar:
             st.error(f"❌ Ошибка подключения: {e}")
 
 # Основное содержимое
-tab1, tab2, tab3, tab4 = st.tabs(["🔍 Поиск", "📊 Аналитика", "🧪 Тесты", "📚 Данные"])
+tab1, tab2, tab3 = st.tabs(["🔍 Поиск", "📊 Аналитика", "🧪 Тесты"])
 
 with tab1:
     st.header("Интерактивный поиск")
@@ -377,13 +377,22 @@ with tab3:
     
     if st.button("🚀 Запустить все тесты", type="primary"):
         with st.spinner("Выполняю тесты..."):
-            # Импортируем и запускаем тестер
-            import sys
+            # Импортируем и запускаем тестер (файл test-runner.py — через importlib)
             import os
-            sys.path.append(os.path.join(os.path.dirname(__file__), '../qdrant_test_scripts'))
+            import importlib.util
+            base_dir = os.path.dirname(os.path.abspath(__file__))
+            for rel in ['../qdrant_test_scripts', '../qdrant-search-tester/qdrant_test_scripts']:
+                runner_path = os.path.normpath(os.path.join(base_dir, rel, 'test-runner.py'))
+                if os.path.isfile(runner_path):
+                    break
+            else:
+                runner_path = os.path.normpath(os.path.join(base_dir, '..', 'qdrant_test_scripts', 'test-runner.py'))
             
             try:
-                from test_runner import QdrantTester
+                spec = importlib.util.spec_from_file_location("test_runner", runner_path)
+                test_runner = importlib.util.module_from_spec(spec)
+                spec.loader.exec_module(test_runner)
+                QdrantTester = test_runner.QdrantTester
                 tester = QdrantTester()
                 results = tester.run_all_tests()
                 
@@ -413,54 +422,55 @@ with tab3:
             except Exception as e:
                 st.error(f"Ошибка при выполнении тестов: {e}")
 
-with tab4:
-    st.header("Просмотр данных")
-    
-    # Показываем все рецепты
-    st.subheader("Все рецепты в базе")
-    st.dataframe(recipes_df, use_container_width=True)
-    
-    # Выбор рецепта для детального просмотра
-    selected_recipe_id = st.selectbox(
-        "Выберите рецепт для детального просмотра:",
-        recipes_df['ID'].tolist()
-    )
-    
-    if selected_recipe_id:
-        recipe = next(r for r in recipes if r['id'] == selected_recipe_id)
-        
-        col1, col2 = st.columns([2, 1])
-        
-        with col1:
-            st.subheader(recipe['name'])
-            st.write(f"**Категория:** {recipe['category']}")
-            st.write(f"**Описание:** {recipe['preparation']['description']}")
-            
-            # Ингредиенты
-            st.markdown("**Ингредиенты:**")
-            for ing in recipe['ingredients']:
-                st.write(f"- {ing['name']}: {ing.get('amount', '?')} {ing.get('unit', '')} {ing.get('notes', '')}")
-            
-            # Процесс
-            st.markdown("**Процесс приготовления:**")
-            for step in recipe['process']:
-                st.write(f"{step['step']}. **{step['action']}**: {step['description']}")
-        
-        with col2:
-            # Sparse vectors
-            if 'sparse_vectors' in recipe:
-                st.markdown("**Ключевые слова для поиска:**")
-                for category, vectors in recipe['sparse_vectors'].items():
-                    with st.expander(f"{category}"):
-                        top_terms = sorted(vectors.items(), key=lambda x: x[1], reverse=True)[:10]
-                        for term, weight in top_terms:
-                            st.progress(weight, text=f"{term}: {weight:.2f}")
-            
-            # Статистика
-            st.markdown("**Статистика:**")
-            st.write(f"Ингредиентов: {len(recipe['ingredients'])}")
-            st.write(f"Шагов процесса: {len(recipe['process'])}")
-            st.write(f"Примечаний: {len(recipe['notes'])}")
+# Раздел "Данные" временно скрыт
+# with tab4:
+#     st.header("Просмотр данных")
+#     
+#     # Показываем все рецепты
+#     st.subheader("Все рецепты в базе")
+#     st.dataframe(recipes_df, use_container_width=True)
+#     
+#     # Выбор рецепта для детального просмотра
+#     selected_recipe_id = st.selectbox(
+#         "Выберите рецепт для детального просмотра:",
+#         recipes_df['ID'].tolist()
+#     )
+#     
+#     if selected_recipe_id:
+#         recipe = next(r for r in recipes if r['id'] == selected_recipe_id)
+#         
+#         col1, col2 = st.columns([2, 1])
+#         
+#         with col1:
+#             st.subheader(recipe['name'])
+#             st.write(f"**Категория:** {recipe['category']}")
+#             st.write(f"**Описание:** {recipe['preparation']['description']}")
+#             
+#             # Ингредиенты
+#             st.markdown("**Ингредиенты:**")
+#             for ing in recipe['ingredients']:
+#                 st.write(f"- {ing['name']}: {ing.get('amount', '?')} {ing.get('unit', '')} {ing.get('notes', '')}")
+#             
+#             # Процесс
+#             st.markdown("**Процесс приготовления:**")
+#             for step in recipe['process']:
+#                 st.write(f"{step['step']}. **{step['action']}**: {step['description']}")
+#         
+#         with col2:
+#             # Sparse vectors
+#             if 'sparse_vectors' in recipe:
+#                 st.markdown("**Ключевые слова для поиска:**")
+#                 for category, vectors in recipe['sparse_vectors'].items():
+#                     with st.expander(f"{category}"):
+#                         top_terms = sorted(vectors.items(), key=lambda x: x[1], reverse=True)[:10]
+#                         for term, weight in top_terms:
+#                             st.progress(weight, text=f"{term}: {weight:.2f}")
+#             
+#             # Статистика
+#             st.markdown("**Статистика:**")
+#             st.write(f"Ингредиентов: {len(recipe['ingredients'])}")
+#             st.write(f"Шагов процесса: {len(recipe['process'])}")
+#             st.write(f"Примечаний: {len(recipe['notes'])}")
 
 # Футер
 st.markdown("---")
