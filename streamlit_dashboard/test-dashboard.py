@@ -13,6 +13,11 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
+# Универсальный клиент эмбеддингов (OpenAI или bgm-m3, размерность по модели)
+import sys
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
+from embedding_client import get_embedding_client
+
 # Настройки страницы
 st.set_page_config(
     page_title="Qdrant Search Tester",
@@ -41,26 +46,19 @@ def init_qdrant_client():
     else:
         return QdrantClient(host=qdrant_host, port=qdrant_port)
 
-OPENAI_EMBEDDING_MODEL = "text-embedding-3-small"
-
-
 @st.cache_resource
 def init_embedder():
-    openai_api_key = os.getenv('OPENAI_API_KEY')
-    if not openai_api_key:
-        return None
+    """Клиент эмбеддингов: OpenAI (1536) или bgm-m3 (1024) по EMBEDDING_MODEL"""
     try:
-        from openai import OpenAI
-        return OpenAI(api_key=openai_api_key)
-    except ImportError:
+        return get_embedding_client()
+    except Exception:
         return None
 
 
 def get_query_embedding(embedder, text: str):
     if embedder is None:
         return None
-    response = embedder.embeddings.create(model=OPENAI_EMBEDDING_MODEL, input=text)
-    return response.data[0].embedding
+    return embedder.get_embedding(text)
 
 # Загрузка данных
 @st.cache_data
@@ -164,7 +162,7 @@ with tab1:
         with st.spinner("Выполняю поиск..."):
             try:
                 if embedder is None:
-                    st.error("OPENAI_API_KEY не задан в .env")
+                    st.error("Модель эмбеддингов не инициализирована. Проверьте EMBEDDING_MODEL и настройки в .env")
                 else:
                     query_embedding = get_query_embedding(embedder, search_query)
                 if query_embedding is None:
