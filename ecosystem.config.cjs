@@ -12,7 +12,7 @@ module.exports = {
     {
       name: 'qdrant-tester',
       script: pythonPath,
-      args: '-m streamlit run streamlit_dashboard/test-dashboard.py --server.port 8501 --server.address 0.0.0.0',
+      args: '-m streamlit run streamlit_dashboard/test_dashboard.py --server.port 8501 --server.address 0.0.0.0',
       cwd: cwd,
       interpreter: 'none',
       env: {
