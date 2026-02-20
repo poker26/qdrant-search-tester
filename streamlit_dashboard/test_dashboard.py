@@ -222,15 +222,17 @@ with tab1:
                     st.error("Не удалось создать эмбеддинг. Проверьте OPENAI_API_KEY.")
                 else:
                     # Выполняем поиск (коллекция с dense-вектором)
+                    # Используем query_points — в новых версиях qdrant-client метод search заменён на query_points
                     start_time = time.time()
-                    results = client.search(
+                    query_response = client.query_points(
                         collection_name=collection_name,
-                        query_vector=models.NamedVector(name="dense", vector=query_embedding),
+                        query=models.NamedVector(name="dense", vector=query_embedding),
                         limit=limit_results,
                         score_threshold=score_threshold,
                         with_payload=True,
                         with_vectors=show_embeddings
                     )
+                    results = query_response.points
                     search_time = time.time() - start_time
                     
                     # Отображаем результаты
