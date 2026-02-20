@@ -4,11 +4,11 @@ const fs = require('fs');
 const rootDir = __dirname;
 const nestedDir = path.join(rootDir, 'qdrant-search-tester');
 
-// Ищем venv и streamlit_dashboard в разных возможных расположениях
+// Предпочитаем корень репо (здесь embedding_client и размерность 1024 для bgm-m3)
 const candidates = [
   { cwd: rootDir, venv: path.join(rootDir, 'venv/bin/python') },
-  { cwd: nestedDir, venv: path.join(nestedDir, 'venv/bin/python') },
-  { cwd: path.join(rootDir, '..'), venv: path.join(rootDir, '..', 'venv/bin/python') }
+  { cwd: path.join(rootDir, '..'), venv: path.join(rootDir, '..', 'venv/bin/python') },
+  { cwd: nestedDir, venv: path.join(nestedDir, 'venv/bin/python') }
 ];
 
 const dashboardPath = 'streamlit_dashboard/test_dashboard.py';
