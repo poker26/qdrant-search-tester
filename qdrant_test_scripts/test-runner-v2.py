@@ -1,5 +1,6 @@
 """
 Обновленный тестовый раннер для работы с гибкими тестами из JSON
+Поддерживает OpenAI и self-hosted модели (bgm-m3)
 """
 import json
 import os
@@ -9,13 +10,12 @@ from qdrant_client.http import models
 from dotenv import load_dotenv
 import sys
 
-# Добавляем путь к test_manager
+# Добавляем путь к модулям
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 from test_manager import TestManager, TestCase
+from embedding_client import get_embedding_client
 
 load_dotenv()
-
-OPENAI_EMBEDDING_MODEL = "text-embedding-3-small"
 
 
 class QdrantTesterV2:
@@ -38,13 +38,11 @@ class QdrantTesterV2:
         else:
             self.client = QdrantClient(host=qdrant_host, port=qdrant_port)
 
-        openai_api_key = os.getenv('OPENAI_API_KEY')
-        if not openai_api_key:
-            raise ValueError(
-                "OPENAI_API_KEY не задан. Укажите ключ в .env или переменных окружения."
-            )
-        from openai import OpenAI
-        self.openai_client = OpenAI(api_key=openai_api_key)
+        # Инициализируем клиент эмбеддингов (OpenAI или bgm-m3)
+        try:
+            self.embedding_client = get_embedding_client()
+        except Exception as e:
+            raise ValueError(f"Ошибка инициализации клиента эмбеддингов: {e}")
 
         # Инициализируем менеджер тестов
         tests_file = tests_file or os.path.join(os.path.dirname(__file__), '..', 'tests.json')
@@ -52,12 +50,8 @@ class QdrantTesterV2:
     
     def run_single_test(self, test_case: TestCase) -> Dict[str, Any]:
         """Запуск одного тест-кейса"""
-        # Получаем эмбеддинг запроса
-        response = self.openai_client.embeddings.create(
-            model=OPENAI_EMBEDDING_MODEL,
-            input=test_case.query
-        )
-        query_embedding = response.data[0].embedding
+        # Получаем эмбеддинг запроса через универсальный клиент
+        query_embedding = self.embedding_client.get_embedding(test_case.query)
         
         # Выполняем поиск
         try:

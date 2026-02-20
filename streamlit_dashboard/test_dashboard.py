@@ -14,8 +14,6 @@ import numpy as np
 
 load_dotenv()
 
-OPENAI_EMBEDDING_MODEL = "text-embedding-3-small"
-
 # Настройки страницы
 st.set_page_config(
     page_title="Qdrant Search Tester",
@@ -69,37 +67,34 @@ def init_qdrant_client():
     else:
         return QdrantClient(host=qdrant_host, port=qdrant_port)
 
+# Импортируем универсальный клиент эмбеддингов
+import sys
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
+from embedding_client import get_embedding_client, EMBEDDING_DIMS
+
+
 @st.cache_resource
 def init_embedder():
-    """Инициализация OpenAI клиента для эмбеддингов (text-embedding-3-small, 1536 dim)"""
-    openai_api_key = os.getenv('OPENAI_API_KEY')
-    if not openai_api_key:
-        st.error("❌ OPENAI_API_KEY не установлен. Добавьте ключ в .env")
-        return None
-
+    """Инициализация клиента для эмбеддингов (OpenAI или bgm-m3)"""
     try:
-        from openai import OpenAI
-    except ImportError:
-        st.error("❌ Библиотека openai не установлена. Выполните: pip install openai")
+        client = get_embedding_client()
+        model_name = client.get_model_name()
+        dim = client.get_embedding_dim()
+        return client
+    except Exception as e:
+        st.error(f"❌ Ошибка инициализации модели эмбеддингов: {e}")
         return None
-
-    proxy_url = os.getenv('HTTP_PROXY') or os.getenv('HTTPS_PROXY')
-    http_client = httpx.Client(proxies=proxy_url, timeout=30.0) if proxy_url else None
-    openai_base_url = os.getenv('OPENAI_BASE_URL', 'https://api.openai.com/v1')
-
-    return OpenAI(
-        api_key=openai_api_key,
-        base_url=openai_base_url,
-        http_client=http_client
-    )
 
 
 def get_query_embedding(embedder, text: str):
-    """Получение эмбеддинга через OpenAI API"""
+    """Получение эмбеддинга через универсальный клиент"""
     if embedder is None:
         return None
-    response = embedder.embeddings.create(model=OPENAI_EMBEDDING_MODEL, input=text)
-    return response.data[0].embedding
+    try:
+        return embedder.get_embedding(text)
+    except Exception as e:
+        st.error(f"Ошибка получения эмбеддинга: {e}")
+        return None
 
 # Загрузка данных
 @st.cache_data

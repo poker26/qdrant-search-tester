@@ -1,6 +1,6 @@
 """
 Скрипт для настройки Qdrant и загрузки тестовых данных.
-Использует OpenAI text-embedding-3-small (размер вектора 1536).
+Поддерживает OpenAI и self-hosted модели (bgm-m3).
 """
 import json
 import time
@@ -11,12 +11,13 @@ from qdrant_client.http import models
 import logging
 from dotenv import load_dotenv
 
+# Добавляем путь к embedding_client
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
+from embedding_client import get_embedding_client, EMBEDDING_DIMS
+
 load_dotenv()
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
-
-OPENAI_EMBEDDING_MODEL = "text-embedding-3-small"
-OPENAI_EMBEDDING_DIM = 1536
 
 
 class QdrantSetup:
@@ -40,13 +41,14 @@ class QdrantSetup:
             logger.info(f"Подключение к локальному Qdrant: {qdrant_host}:{qdrant_port}")
             self.client = QdrantClient(host=qdrant_host, port=qdrant_port)
 
-        openai_api_key = os.getenv('OPENAI_API_KEY')
-        if not openai_api_key:
-            raise ValueError(
-                "OPENAI_API_KEY не задан. Укажите ключ в .env или переменных окружения."
-            )
-        from openai import OpenAI
-        self.openai_client = OpenAI(api_key=openai_api_key)
+        # Инициализируем клиент эмбеддингов (OpenAI или bgm-m3)
+        try:
+            self.embedding_client = get_embedding_client()
+            embedding_type = os.getenv('EMBEDDING_MODEL', 'bgm-m3').lower()
+            self.embedding_dim = EMBEDDING_DIMS.get(embedding_type, 1024)
+            logger.info(f"Используется модель эмбеддингов: {self.embedding_client.get_model_name()} (размерность: {self.embedding_dim})")
+        except Exception as e:
+            raise ValueError(f"Ошибка инициализации клиента эмбеддингов: {e}")
         
     def delete_collection(self, collection_name: str) -> bool:
         """Удаление коллекции"""
@@ -62,9 +64,12 @@ class QdrantSetup:
     def create_collection(
         self,
         collection_name: str = "test_recipes",
-        vector_size: int = OPENAI_EMBEDDING_DIM,
+        vector_size: int = None,
         recreate: bool = False
     ) -> bool:
+        """Создание коллекции с нужной схемой"""
+        if vector_size is None:
+            vector_size = self.embedding_dim
         """Создание коллекции с нужной схемой (OpenAI text-embedding-3-small, размер 1536)"""
         try:
             collections = self.client.get_collections()
@@ -108,17 +113,16 @@ class QdrantSetup:
             return False
     
     def _get_embeddings_batch(self, texts: list[str]) -> list[list[float]]:
-        """Получение эмбеддингов через OpenAI API (батчами до 2048 токенов на запрос)"""
+        """Получение эмбеддингов через универсальный клиент (батчами)"""
         embeddings = []
         batch_size = 20
         for i in range(0, len(texts), batch_size):
             batch = texts[i:i + batch_size]
-            response = self.openai_client.embeddings.create(
-                model=OPENAI_EMBEDDING_MODEL,
-                input=batch
-            )
-            for item in response.data:
-                embeddings.append(item.embedding)
+            batch_embeddings = self.embedding_client.get_embedding(batch)
+            if isinstance(batch_embeddings[0], list):
+                embeddings.extend(batch_embeddings)
+            else:
+                embeddings.append(batch_embeddings)
         return embeddings
 
     def load_recipes_data(self):
@@ -141,7 +145,7 @@ class QdrantSetup:
             )
             texts_for_embedding.append(text_for_embedding)
 
-        logger.info(f"Получение эмбеддингов через OpenAI ({OPENAI_EMBEDDING_MODEL})...")
+        logger.info(f"Получение эмбеддингов через {self.embedding_client.get_model_name()}...")
         embeddings_list = self._get_embeddings_batch(texts_for_embedding)
 
         points = []
@@ -268,7 +272,10 @@ if __name__ == "__main__":
         sys.exit(1)
 
     if args.recreate or args.upload:
-        vector_size = int(os.getenv('COLLECTION_VECTOR_SIZE', str(OPENAI_EMBEDDING_DIM)))
+        # Определяем размерность вектора из модели эмбеддингов
+        embedding_type = os.getenv('EMBEDDING_MODEL', 'bgm-m3').lower()
+        default_dim = EMBEDDING_DIMS.get(embedding_type, 1024)
+        vector_size = int(os.getenv('COLLECTION_VECTOR_SIZE', str(default_dim)))
         if setup.create_collection(
             collection_name=collection_name,
             vector_size=vector_size,
