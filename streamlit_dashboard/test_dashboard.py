@@ -5,13 +5,17 @@ import streamlit as st
 import pandas as pd
 import plotly.express as px
 from qdrant_client import QdrantClient
-from sentence_transformers import SentenceTransformer
+from qdrant_client.http import models
 import json
 import time
 import os
 from dotenv import load_dotenv
+import httpx
+import numpy as np
 
 load_dotenv()
+
+OPENAI_EMBEDDING_MODEL = "text-embedding-3-small"
 
 # Настройки страницы
 st.set_page_config(
@@ -68,7 +72,35 @@ def init_qdrant_client():
 
 @st.cache_resource
 def init_embedder():
-    return SentenceTransformer('intfloat/multilingual-e5-small')
+    """Инициализация OpenAI клиента для эмбеддингов (text-embedding-3-small, 1536 dim)"""
+    openai_api_key = os.getenv('OPENAI_API_KEY')
+    if not openai_api_key:
+        st.error("❌ OPENAI_API_KEY не установлен. Добавьте ключ в .env")
+        return None
+
+    try:
+        from openai import OpenAI
+    except ImportError:
+        st.error("❌ Библиотека openai не установлена. Выполните: pip install openai")
+        return None
+
+    proxy_url = os.getenv('HTTP_PROXY') or os.getenv('HTTPS_PROXY')
+    http_client = httpx.Client(proxies=proxy_url, timeout=30.0) if proxy_url else None
+    openai_base_url = os.getenv('OPENAI_BASE_URL', 'https://api.openai.com/v1')
+
+    return OpenAI(
+        api_key=openai_api_key,
+        base_url=openai_base_url,
+        http_client=http_client
+    )
+
+
+def get_query_embedding(embedder, text: str):
+    """Получение эмбеддинга через OpenAI API"""
+    if embedder is None:
+        return None
+    response = embedder.embeddings.create(model=OPENAI_EMBEDDING_MODEL, input=text)
+    return response.data[0].embedding
 
 # Загрузка данных
 @st.cache_data
@@ -184,77 +216,79 @@ with tab1:
     if st.button("🔎 Выполнить поиск", type="primary", use_container_width=True):
         with st.spinner("Выполняю поиск..."):
             try:
-                # Создаем эмбеддинг
-                query_embedding = embedder.encode(search_query).tolist()
-                
-                # Выполняем поиск
-                start_time = time.time()
-                results = client.search(
-                    collection_name=collection_name,
-                    query_vector=query_embedding,
-                    limit=limit_results,
-                    score_threshold=score_threshold,
-                    with_payload=True,
-                    with_vectors=show_embeddings
-                )
-                search_time = time.time() - start_time
-                
-                # Отображаем результаты
-                st.subheader(f"Результаты поиска ({len(results)} найдено, время: {search_time:.2f}с)")
-                
-                if not results:
-                    st.warning("Ничего не найдено. Попробуйте изменить запрос или снизить порог релевантности.")
+                # Создаем эмбеддинг через OpenAI
+                query_embedding = get_query_embedding(embedder, search_query)
+                if query_embedding is None:
+                    st.error("Не удалось создать эмбеддинг. Проверьте OPENAI_API_KEY.")
                 else:
-                    # Таблица с результатами
-                    result_data = []
-                    for i, hit in enumerate(results, 1):
-                        result_data.append({
-                            "№": i,
-                            "Название": hit.payload.get('name', 'N/A'),
-                            "ID": hit.payload.get('id', 'N/A'),
-                            "Score": f"{hit.score:.3f}",
-                            "Категория": hit.payload.get('category', 'N/A'),
-                            "Ингредиентов": len(hit.payload.get('ingredients', []))
-                        })
+                    # Выполняем поиск (коллекция с dense-вектором)
+                    start_time = time.time()
+                    results = client.search(
+                        collection_name=collection_name,
+                        query_vector=models.NamedVector(name="dense", vector=query_embedding),
+                        limit=limit_results,
+                        score_threshold=score_threshold,
+                        with_payload=True,
+                        with_vectors=show_embeddings
+                    )
+                    search_time = time.time() - start_time
                     
-                    result_df = pd.DataFrame(result_data)
-                    st.dataframe(result_df, use_container_width=True)
+                    # Отображаем результаты
+                    st.subheader(f"Результаты поиска ({len(results)} найдено, время: {search_time:.2f}с)")
                     
-                    # Детали для каждого результата
-                    if show_details:
+                    if not results:
+                        st.warning("Ничего не найдено. Попробуйте изменить запрос или снизить порог релевантности.")
+                    else:
+                        # Таблица с результатами
+                        result_data = []
                         for i, hit in enumerate(results, 1):
-                            with st.expander(f"#{i}: {hit.payload.get('name')} (score: {hit.score:.3f})"):
-                                col_a, col_b = st.columns(2)
-                                
-                                with col_a:
-                                    st.markdown("**Основная информация:**")
-                                    st.write(f"**ID:** `{hit.payload.get('id')}`")
-                                    st.write(f"**Категория:** {hit.payload.get('category')}")
-                                    st.write(f"**Описание:** {hit.payload.get('preparation', {}).get('description', 'N/A')}")
-                                
-                                with col_b:
-                                    st.markdown("**Статистика:**")
-                                    st.write(f"**Ингредиентов:** {len(hit.payload.get('ingredients', []))}")
-                                    st.write(f"**Шагов процесса:** {len(hit.payload.get('process', []))}")
-                                    st.write(f"**Примечаний:** {len(hit.payload.get('notes', []))}")
-                                
-                                # Ингредиенты
-                                if hit.payload.get('ingredients'):
-                                    st.markdown("**Ингредиенты:**")
-                                    ingredients_text = ", ".join([
-                                        f"{ing.get('name')} ({ing.get('amount', '?')} {ing.get('unit', '')})"
-                                        for ing in hit.payload.get('ingredients', [])
-                                    ])
-                                    st.write(ingredients_text[:200] + "...")
-                                
-                                # Ключевые слова из sparse vectors
-                                if hasattr(hit, 'sparse_vector') and hit.sparse_vector:
-                                    st.markdown("**Ключевые слова:**")
-                                    for category, terms in hit.sparse_vector.items():
-                                        if terms:
-                                            top_terms = sorted(terms.items(), key=lambda x: x[1], reverse=True)[:5]
-                                            terms_text = ", ".join([f"{term}" for term, _ in top_terms])
-                                            st.write(f"*{category}:* {terms_text}")
+                            result_data.append({
+                                "№": i,
+                                "Название": hit.payload.get('name', 'N/A'),
+                                "ID": hit.payload.get('id', 'N/A'),
+                                "Score": f"{hit.score:.3f}",
+                                "Категория": hit.payload.get('category', 'N/A'),
+                                "Ингредиентов": len(hit.payload.get('ingredients', []))
+                            })
+                        
+                        result_df = pd.DataFrame(result_data)
+                        st.dataframe(result_df, use_container_width=True)
+                        
+                        # Детали для каждого результата
+                        if show_details:
+                            for i, hit in enumerate(results, 1):
+                                with st.expander(f"#{i}: {hit.payload.get('name')} (score: {hit.score:.3f})"):
+                                    col_a, col_b = st.columns(2)
+                                    
+                                    with col_a:
+                                        st.markdown("**Основная информация:**")
+                                        st.write(f"**ID:** `{hit.payload.get('id')}`")
+                                        st.write(f"**Категория:** {hit.payload.get('category')}")
+                                        st.write(f"**Описание:** {hit.payload.get('preparation', {}).get('description', 'N/A')}")
+                                    
+                                    with col_b:
+                                        st.markdown("**Статистика:**")
+                                        st.write(f"**Ингредиентов:** {len(hit.payload.get('ingredients', []))}")
+                                        st.write(f"**Шагов процесса:** {len(hit.payload.get('process', []))}")
+                                        st.write(f"**Примечаний:** {len(hit.payload.get('notes', []))}")
+                                    
+                                    # Ингредиенты
+                                    if hit.payload.get('ingredients'):
+                                        st.markdown("**Ингредиенты:**")
+                                        ingredients_text = ", ".join([
+                                            f"{ing.get('name')} ({ing.get('amount', '?')} {ing.get('unit', '')})"
+                                            for ing in hit.payload.get('ingredients', [])
+                                        ])
+                                        st.write(ingredients_text[:200] + "...")
+                                    
+                                    # Ключевые слова из sparse vectors
+                                    if hasattr(hit, 'sparse_vector') and hit.sparse_vector:
+                                        st.markdown("**Ключевые слова:**")
+                                        for category, terms in hit.sparse_vector.items():
+                                            if terms:
+                                                top_terms = sorted(terms.items(), key=lambda x: x[1], reverse=True)[:5]
+                                                terms_text = ", ".join([f"{term}" for term, _ in top_terms])
+                                                st.write(f"*{category}:* {terms_text}")
                 
             except Exception as e:
                 st.error(f"Ошибка при поиске: {e}")
