@@ -1,0 +1,12 @@
+# Пример конфигурации Streamlit для работы с base path через nginx
+# Скопируйте этот файл в .streamlit/config.toml в корне проекта
+
+[server]
+baseUrlPath = "/qtester"
+enableCORS = false
+enableXsrfProtection = false
+port = 8501
+address = "0.0.0.0"
+
+[browser]
+gatherUsageStats = false

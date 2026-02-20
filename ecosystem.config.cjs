@@ -48,7 +48,8 @@ module.exports = {
       cwd: cwd,
       interpreter: 'none',
       env: {
-        NODE_ENV: 'production'
+        NODE_ENV: 'production',
+        STREAMLIT_SERVER_BASE_URL_PATH: '/qtester'
       }
     }
   ]
