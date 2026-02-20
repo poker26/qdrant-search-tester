@@ -108,15 +108,29 @@ class QdrantTester:
             )
             query_embedding = response.data[0].embedding
             
-            search_result = self.client.search(
-                collection_name=self.collection_name,
-                query_vector=models.NamedVector(
-                    name="dense",
-                    vector=query_embedding
-                ),
-                limit=10,
-                with_payload=True
-            )
+            # Используем query_points вместо search (новый API qdrant-client)
+            try:
+                query_response = self.client.query_points(
+                    collection_name=self.collection_name,
+                    query=query_embedding,
+                    using="dense",
+                    limit=10,
+                    with_payload=True
+                )
+                search_result = query_response.points
+            except Exception as vec_err:
+                err_msg = str(vec_err).lower()
+                if "dense" in err_msg and ("not existing" in err_msg or "vector name" in err_msg):
+                    # Fallback для коллекций с default вектором
+                    query_response = self.client.query_points(
+                        collection_name=self.collection_name,
+                        query=query_embedding,
+                        limit=10,
+                        with_payload=True
+                    )
+                    search_result = query_response.points
+                else:
+                    raise
             
             found_rank = None
             found_score = 0.0
