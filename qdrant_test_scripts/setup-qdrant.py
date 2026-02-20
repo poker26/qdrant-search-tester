@@ -70,7 +70,7 @@ class QdrantSetup:
         """Создание коллекции с нужной схемой"""
         if vector_size is None:
             vector_size = self.embedding_dim
-        """Создание коллекции с нужной схемой (OpenAI text-embedding-3-small, размер 1536)"""
+        """Создание коллекции с нужной схемой (размер вектора определяется моделью эмбеддингов)"""
         try:
             collections = self.client.get_collections()
             existing = any(c.name == collection_name for c in collections.collections)
@@ -251,7 +251,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--recreate",
         action="store_true",
-        help="Пересоздать коллекцию (удалить и создать заново с размером 1536)"
+        help="Пересоздать коллекцию (удалить и создать заново с размером вектора из модели)"
     )
     parser.add_argument(
         "--upload",

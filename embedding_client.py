@@ -20,6 +20,7 @@ class EmbeddingClient:
     """Универсальный клиент для получения эмбеддингов"""
     
     def __init__(self):
+        # По умолчанию используем bgm-m3 (1024 dim), можно переопределить через EMBEDDING_MODEL=openai
         self.embedding_type = os.getenv('EMBEDDING_MODEL', 'bgm-m3').lower()
         self.client = None
         self._init_client()
@@ -186,6 +187,7 @@ class EmbeddingClient:
     
     def get_embedding_dim(self) -> int:
         """Получить размерность вектора для текущей модели"""
+        # По умолчанию 1024 (BGM-M3), если модель не найдена
         return EMBEDDING_DIMS.get(self.embedding_type, 1024)
     
     def get_model_name(self) -> str:
