@@ -1,74 +1,20 @@
 version: '3.8'
 
 services:
-  qdrant:
-    image: qdrant/qdrant:latest
-    container_name: qdrant-test
-    ports:
-      - "6333:6333"
-      - "6334:6334"
-    volumes:
-      - qdrant_data:/qdrant/storage
-    environment:
-      - QDRANT__SERVICE__GRPC_PORT=6334
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:6333/health"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-    networks:
-      - qdrant-network
-
-  tester:
-    build:
-      context: .
-      dockerfile: Dockerfile
-    container_name: qdrant-tester
-    depends_on:
-      qdrant:
-        condition: service_healthy
-    environment:
-      - QDRANT_HOST=qdrant
-      - QDRANT_PORT=6333
-      - EMBEDDING_MODEL=openai
-      - COLLECTION_VECTOR_SIZE=1536
-    volumes:
-      - ./data:/app/data
-      - ./reports:/app/reports
-      - ./test_reports:/app/test_reports
-    command: >
-      sh -c "
-      echo 'Waiting for Qdrant...' &&
-      sleep 10 &&
-      python qdrant_test_scripts/setup_qdrant.py &&
-      python qdrant_test_scripts/test_runner.py
-      "
-    networks:
-      - qdrant-network
-
   dashboard:
     build:
       context: .
-      dockerfile: Dockerfile.dashboard
-    container_name: qdrant-dashboard
-    depends_on:
-      - qdrant
+      dockerfile: Dockerfile
+    container_name: qdrant-search-tester
     ports:
-      - "8501:8501"
+      - "${DASHBOARD_PORT:-8501}:8501"
+    env_file:
+      - .env
     environment:
-      - QDRANT_HOST=qdrant
-      - QDRANT_PORT=6333
       - STREAMLIT_SERVER_PORT=8501
       - STREAMLIT_SERVER_ADDRESS=0.0.0.0
     volumes:
       - ./data:/app/data
-    command: streamlit run streamlit_dashboard/dashboard.py
-    networks:
-      - qdrant-network
-
-networks:
-  qdrant-network:
-    driver: bridge
-
-volumes:
-  qdrant_data:
+      - ./tests.json:/app/tests.json
+    command: streamlit run streamlit_dashboard/test_dashboard.py
+    restart: unless-stopped

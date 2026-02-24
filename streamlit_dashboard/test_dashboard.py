@@ -1,20 +1,23 @@
 """
-Streamlit дашборд для интерактивного тестирования поиска в Qdrant
+Streamlit дашборд для тестирования поиска в Qdrant.
+Поддерживает: dense, sparse, hybrid (RRF), сравнение коллекций.
 """
 import streamlit as st
 import pandas as pd
-import plotly.express as px
-from qdrant_client import QdrantClient
-import json
 import time
 import os
+import sys
 from dotenv import load_dotenv
-import httpx
-import numpy as np
 
 load_dotenv()
 
-# Настройки страницы
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
+from embedding_client import get_embedding_client, EmbeddingResult
+
+from qdrant_client import QdrantClient
+from qdrant_client.http import models
+
+# --- Page config ---
 st.set_page_config(
     page_title="Qdrant Search Tester",
     page_icon="🔍",
@@ -22,611 +25,433 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
-# Инициализация клиентов
+# --- Init ---
+
 @st.cache_resource
-def init_qdrant_client():
-    qdrant_url = os.getenv('QDRANT_URL', '').strip()
-    qdrant_host = os.getenv('QDRANT_HOST', 'localhost').strip()
-    qdrant_port_str = os.getenv('QDRANT_PORT', '6333').strip()
-    qdrant_port = int(qdrant_port_str) if qdrant_port_str else 6333
-    qdrant_api_key = os.getenv('QDRANT_API_KEY', '').strip()
-    
-    if qdrant_url:
-        # Если URL содержит порт, извлекаем его отдельно
-        if ':' in qdrant_url and qdrant_url.count(':') > 1:  # Есть порт в URL (https://host:port)
-            from urllib.parse import urlparse
-            parsed = urlparse(qdrant_url.strip())
-            base_url = f"{parsed.scheme}://{parsed.hostname}"
-            port = parsed.port if parsed.port else 443
-            
-            if qdrant_api_key:
-                return QdrantClient(
-                    url=base_url,
-                    port=port,
-                    api_key=qdrant_api_key,
-                    https=True,
-                    check_compatibility=False
-                )
-            else:
-                return QdrantClient(
-                    url=base_url,
-                    port=port,
-                    https=True,
-                    check_compatibility=False
-                )
-        else:
-            # URL без порта
-            if qdrant_api_key:
-                return QdrantClient(
-                    url=qdrant_url, 
-                    api_key=qdrant_api_key,
-                    check_compatibility=False
-                )
-            else:
-                return QdrantClient(url=qdrant_url, check_compatibility=False)
-    else:
-        return QdrantClient(host=qdrant_host, port=qdrant_port)
-
-# Импортируем универсальный клиент эмбеддингов
-import sys
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
-from embedding_client import get_embedding_client, EMBEDDING_DIMS
-
+def init_qdrant():
+    url = os.getenv('QDRANT_URL', '').strip()
+    host = os.getenv('QDRANT_HOST', 'localhost').strip()
+    port = int(os.getenv('QDRANT_PORT', '6333'))
+    api_key = os.getenv('QDRANT_API_KEY', '').strip()
+    if url:
+        kwargs = {"url": url, "check_compatibility": False}
+        if api_key:
+            kwargs["api_key"] = api_key
+        return QdrantClient(**kwargs)
+    return QdrantClient(host=host, port=port)
 
 @st.cache_resource
 def init_embedder():
-    """Инициализация клиента для эмбеддингов (OpenAI или bgm-m3)"""
     try:
-        client = get_embedding_client()
-        model_name = client.get_model_name()
-        dim = client.get_embedding_dim()
-        return client
+        return get_embedding_client()
     except Exception as e:
-        st.error(f"❌ Ошибка инициализации модели эмбеддингов: {e}")
+        st.error(f"❌ Ошибка модели эмбеддингов: {e}")
         return None
 
+client = init_qdrant()
+embedder = init_embedder()
 
-def get_query_embedding(embedder, text: str):
-    """Получение эмбеддинга через универсальный клиент"""
-    if embedder is None:
-        return None
+
+def get_collections():
     try:
-        return embedder.get_embedding(text)
-    except Exception as e:
-        st.error(f"Ошибка получения эмбеддинга: {e}")
-        return None
+        cols = client.get_collections()
+        return [c.name for c in cols.collections]
+    except Exception:
+        return ["distill_hybrid", "distill_hybrid_v2"]
 
-# Загрузка данных
-@st.cache_data
-def load_recipes_data():
-    with open('data/recipes_structured.json', 'r', encoding='utf-8') as f:
-        recipes = json.load(f)['recipes']
-    
-    # Создаем DataFrame для отображения
-    df_data = []
-    for recipe in recipes:
-        df_data.append({
-            "ID": recipe['id'],
-            "Название": recipe['name'],
-            "Описание": recipe['preparation']['description'][:100] + "...",
-            "Ингредиенты": len(recipe['ingredients']),
-            "Шаги": len(recipe['process']),
-            "Категория": recipe['category']
+
+def do_search(collection: str, emb: EmbeddingResult, mode: str, limit: int, score_threshold: float):
+    """
+    Выполняет поиск в Qdrant.
+    mode: 'dense', 'sparse', 'hybrid'
+    """
+    start = time.time()
+
+    if mode == "dense":
+        resp = client.query_points(
+            collection_name=collection,
+            query=emb.dense,
+            using="dense",
+            limit=limit,
+            score_threshold=score_threshold,
+            with_payload=True,
+        )
+        results = resp.points
+
+    elif mode == "sparse" and emb.sparse:
+        resp = client.query_points(
+            collection_name=collection,
+            query=models.SparseVector(
+                indices=emb.sparse["indices"],
+                values=emb.sparse["values"]
+            ),
+            using="sparse",
+            limit=limit,
+            with_payload=True,
+        )
+        results = resp.points
+
+    elif mode == "hybrid" and emb.sparse:
+        # RRF fusion: prefetch dense + sparse, fuse
+        resp = client.query_points(
+            collection_name=collection,
+            prefetch=[
+                models.Prefetch(
+                    query=emb.dense,
+                    using="dense",
+                    limit=limit * 3,
+                ),
+                models.Prefetch(
+                    query=models.SparseVector(
+                        indices=emb.sparse["indices"],
+                        values=emb.sparse["values"]
+                    ),
+                    using="sparse",
+                    limit=limit * 3,
+                ),
+            ],
+            query=models.FusionQuery(fusion=models.Fusion.RRF),
+            limit=limit,
+            with_payload=True,
+        )
+        results = resp.points
+    else:
+        # fallback to dense
+        resp = client.query_points(
+            collection_name=collection,
+            query=emb.dense,
+            using="dense",
+            limit=limit,
+            score_threshold=score_threshold,
+            with_payload=True,
+        )
+        results = resp.points
+
+    elapsed = time.time() - start
+    return results, elapsed
+
+
+def results_to_df(results):
+    rows = []
+    for i, hit in enumerate(results, 1):
+        p = hit.payload
+        rows.append({
+            "№": i,
+            "Score": f"{hit.score:.4f}",
+            "Название": p.get("recipe_name", p.get("name", "N/A")),
+            "ID": p.get("recipe_id", p.get("id", "N/A")),
+            "Категория": p.get("category", ""),
+            "Длина": p.get("content_length", ""),
         })
-    
-    return recipes, pd.DataFrame(df_data)
+    return pd.DataFrame(rows)
 
-# Инициализация (ленивая - выполняется только при первом обращении)
-@st.cache_resource
-def get_client():
-    return init_qdrant_client()
 
-@st.cache_resource  
-def get_embedder():
-    return init_embedder()
+def show_result_details(results):
+    for i, hit in enumerate(results, 1):
+        p = hit.payload
+        name = p.get("recipe_name", p.get("name", "N/A"))
+        with st.expander(f"#{i} {name} (score: {hit.score:.4f})"):
+            st.write(f"**ID:** `{p.get('recipe_id', p.get('id'))}`")
+            if p.get("category"):
+                st.write(f"**Категория:** {p['category']}")
+            content = p.get("content", p.get("full_text", ""))
+            if content:
+                st.text_area("Содержание", content[:2000], height=200, disabled=True, key=f"content_{i}_{id(hit)}")
+            if p.get("sparse_token_count"):
+                st.caption(f"Sparse tokens: {p['sparse_token_count']}, Dense dim: {p.get('vector_dimension', '')}")
 
-@st.cache_data
-def get_recipes_data():
-    return load_recipes_data()
 
-# Инициализация при первом использовании
-client = get_client()
-embedder = get_embedder()
-# recipes, recipes_df = get_recipes_data()  # Временно отключено, раздел "Данные" скрыт
-
-# Заголовок
-st.title("🔍 Qdrant Search Test Dashboard")
+# --- Sidebar ---
+st.title("🔍 Qdrant Search Tester")
 st.markdown("---")
 
-# Сайдбар с настройками
 with st.sidebar:
-    st.header("⚙️ Настройки поиска")
-    
-    # Получаем список коллекций
-    try:
-        collections = client.get_collections()
-        collection_names = [c.name for c in collections.collections]
-        default_collection = os.getenv('COLLECTION_NAME', 'distill_hybrid')
-        default_index = collection_names.index(default_collection) if default_collection in collection_names else 0
-    except:
-        collection_names = ["distill_hybrid"]
-        default_index = 0
-    
-    collection_name = st.selectbox(
-        "Коллекция:",
-        collection_names,
-        index=default_index
-    )
-    
-    search_type = st.radio(
+    st.header("⚙️ Настройки")
+
+    collection_names = get_collections()
+    default_col = os.getenv('COLLECTION_NAME', 'distill_hybrid_v2')
+    default_idx = collection_names.index(default_col) if default_col in collection_names else 0
+
+    collection = st.selectbox("Коллекция:", collection_names, index=default_idx)
+
+    search_mode = st.radio(
         "Тип поиска:",
-        ["Векторный (семантический)", "Гибридный", "По ключевым словам"],
-        index=0
+        ["hybrid", "dense", "sparse"],
+        format_func=lambda x: {"hybrid": "🔀 Гибридный (RRF)", "dense": "🧠 Dense (семантика)", "sparse": "📝 Sparse (лексика)"}[x]
     )
-    
-    limit_results = st.slider(
-        "Количество результатов:",
-        min_value=1,
-        max_value=20,
-        value=5
-    )
-    
-    score_threshold = st.slider(
-        "Порог релевантности:",
-        min_value=0.0,
-        max_value=1.0,
-        value=0.3,
-        step=0.05
-    )
-    
+
+    limit = st.slider("Результатов:", 1, 20, 5)
+    score_threshold = st.slider("Порог score:", 0.0, 1.0, 0.0, 0.05)
+
     if st.button("🔄 Проверить подключение"):
         try:
-            count = client.count(collection_name=collection_name).count
-            st.success(f"✅ Подключено! В коллекции {count} записей")
+            cnt = client.count(collection_name=collection).count
+            model = embedder.get_model_name() if embedder else "N/A"
+            sparse_ok = "✅" if embedder and embedder.supports_sparse() else "❌"
+            st.success(f"✅ {collection}: {cnt} записей\nМодель: {model}\nSparse: {sparse_ok}")
         except Exception as e:
-            st.error(f"❌ Ошибка подключения: {e}")
+            st.error(f"❌ {e}")
 
-# Основное содержимое
-tab1, tab2, tab3 = st.tabs(["🔍 Поиск", "📊 Аналитика", "🧪 Тесты"])
+# --- Tabs ---
+tab1, tab2, tab3, tab4 = st.tabs(["🔍 Поиск", "⚖️ Сравнение коллекций", "📊 Сравнение режимов", "🧪 Тесты"])
 
+# === TAB 1: Поиск ===
 with tab1:
     st.header("Интерактивный поиск")
-    
-    col1, col2 = st.columns([3, 1])
-    
-    with col1:
-        search_query = st.text_area(
-            "Поисковый запрос:",
-            "технология производства водки из картофеля",
-            height=100,
-            help="Введите запрос для семантического поиска"
-        )
-    
-    with col2:
-        st.markdown("### Дополнительно")
-        show_details = st.checkbox("Показать детали", value=True)
-        show_embeddings = st.checkbox("Показать эмбеддинги", value=False)
-    
-    if st.button("🔎 Выполнить поиск", type="primary", use_container_width=True):
-        with st.spinner("Выполняю поиск..."):
-            try:
-                # Создаем эмбеддинг через OpenAI
-                query_embedding = get_query_embedding(embedder, search_query)
-                if query_embedding is None:
-                    st.error("Не удалось создать эмбеддинг. Проверьте OPENAI_API_KEY.")
+
+    query_text = st.text_area(
+        "Запрос:",
+        "рецепт водки с анисом и корицей",
+        height=80
+    )
+    show_details = st.checkbox("Показать детали", value=True, key="t1_details")
+
+    if st.button("🔎 Искать", type="primary", use_container_width=True, key="t1_search"):
+        if not embedder:
+            st.error("Embedder не инициализирован")
+        else:
+            with st.spinner("Поиск..."):
+                emb = embedder.get_embedding_full(query_text)
+                results, elapsed = do_search(collection, emb, search_mode, limit, score_threshold)
+
+                st.subheader(f"Результаты: {len(results)} ({elapsed:.2f}с, режим: {search_mode})")
+                if not results:
+                    st.warning("Ничего не найдено")
                 else:
-                    # Выполняем поиск
-                    # Сначала пробуем с using="dense", при ошибке — без using (default vector)
-                    start_time = time.time()
-                    try:
-                        query_response = client.query_points(
-                            collection_name=collection_name,
-                            query=query_embedding,
-                            using="dense",
-                            limit=limit_results,
-                            score_threshold=score_threshold,
-                            with_payload=True,
-                            with_vectors=show_embeddings
-                        )
-                    except Exception as vec_err:
-                        err_msg = str(vec_err).lower()
-                        if "dense" in err_msg and ("not existing" in err_msg or "vector name" in err_msg):
-                            # Коллекция с default-вектором (без имени)
-                            query_response = client.query_points(
-                                collection_name=collection_name,
-                                query=query_embedding,
-                                limit=limit_results,
-                                score_threshold=score_threshold,
-                                with_payload=True,
-                                with_vectors=show_embeddings
-                            )
-                        else:
-                            raise
-                    results = query_response.points
-                    search_time = time.time() - start_time
-                    
-                    # Отображаем результаты
-                    st.subheader(f"Результаты поиска ({len(results)} найдено, время: {search_time:.2f}с)")
-                    
-                    if not results:
-                        st.warning("Ничего не найдено. Попробуйте изменить запрос или снизить порог релевантности.")
-                    else:
-                        # Таблица с результатами
-                        result_data = []
-                        for i, hit in enumerate(results, 1):
-                            result_data.append({
-                                "№": i,
-                                "Название": hit.payload.get('name', 'N/A'),
-                                "ID": hit.payload.get('id', 'N/A'),
-                                "Score": f"{hit.score:.3f}",
-                                "Категория": hit.payload.get('category', 'N/A'),
-                                "Ингредиентов": len(hit.payload.get('ingredients', []))
-                            })
-                        
-                        result_df = pd.DataFrame(result_data)
-                        st.dataframe(result_df, use_container_width=True)
-                        
-                        # Детали для каждого результата
-                        if show_details:
-                            for i, hit in enumerate(results, 1):
-                                with st.expander(f"#{i}: {hit.payload.get('name')} (score: {hit.score:.3f})"):
-                                    col_a, col_b = st.columns(2)
-                                    
-                                    with col_a:
-                                        st.markdown("**Основная информация:**")
-                                        st.write(f"**ID:** `{hit.payload.get('id')}`")
-                                        st.write(f"**Категория:** {hit.payload.get('category')}")
-                                        st.write(f"**Описание:** {hit.payload.get('preparation', {}).get('description', 'N/A')}")
-                                    
-                                    with col_b:
-                                        st.markdown("**Статистика:**")
-                                        st.write(f"**Ингредиентов:** {len(hit.payload.get('ingredients', []))}")
-                                        st.write(f"**Шагов процесса:** {len(hit.payload.get('process', []))}")
-                                        st.write(f"**Примечаний:** {len(hit.payload.get('notes', []))}")
-                                    
-                                    # Ингредиенты
-                                    if hit.payload.get('ingredients'):
-                                        st.markdown("**Ингредиенты:**")
-                                        ingredients_text = ", ".join([
-                                            f"{ing.get('name')} ({ing.get('amount', '?')} {ing.get('unit', '')})"
-                                            for ing in hit.payload.get('ingredients', [])
-                                        ])
-                                        st.write(ingredients_text[:200] + "...")
-                                    
-                                    # Ключевые слова из sparse vectors
-                                    if hasattr(hit, 'sparse_vector') and hit.sparse_vector:
-                                        st.markdown("**Ключевые слова:**")
-                                        for category, terms in hit.sparse_vector.items():
-                                            if terms:
-                                                top_terms = sorted(terms.items(), key=lambda x: x[1], reverse=True)[:5]
-                                                terms_text = ", ".join([f"{term}" for term, _ in top_terms])
-                                                st.write(f"*{category}:* {terms_text}")
-                
-            except Exception as e:
-                st.error(f"Ошибка при поиске: {e}")
+                    st.dataframe(results_to_df(results), use_container_width=True, hide_index=True)
+                    if show_details:
+                        show_result_details(results)
 
+# === TAB 2: Сравнение коллекций ===
 with tab2:
-    st.header("Аналитика поиска")
-    
-    # Статистика коллекции
-    try:
-        count = client.count(collection_name=collection_name).count
-        
-        col1, col2, col3 = st.columns(3)
-        with col1:
-            st.metric("Всего записей", count)
-        with col2:
-            st.metric("Коллекция", collection_name)
-        with col3:
-            st.metric("Тип поиска", search_type)
-        
-        # Визуализация категорий
-        st.subheader("Распределение по категориям")
-        
-        # Получаем все записи для анализа
-        scroll_result = client.scroll(
-            collection_name=collection_name,
-            limit=1000,
-            with_payload=True
-        )
-        
-        if scroll_result[0]:
-            # Анализируем категории
-            categories = {}
-            for point in scroll_result[0]:
-                category = point.payload.get('category', 'unknown')
-                categories[category] = categories.get(category, 0) + 1
-            
-            if categories:
-                # Создаем график
-                cat_df = pd.DataFrame({
-                    'Категория': list(categories.keys()),
-                    'Количество': list(categories.values())
-                })
-                
-                fig = px.pie(cat_df, values='Количество', names='Категория',
-                           title='Распределение по категориям',
-                           hole=0.3)
-                st.plotly_chart(fig, use_container_width=True)
-                
-                # Гистограмма по количеству ингредиентов
-                st.subheader("Количество ингредиентов в рецептах")
-                
-                ingredient_counts = []
-                for point in scroll_result[0]:
-                    count = len(point.payload.get('ingredients', []))
-                    ingredient_counts.append(count)
-                
-                if ingredient_counts:
-                    fig2 = px.histogram(x=ingredient_counts, 
-                                      nbins=10,
-                                      title='Распределение по количеству ингредиентов',
-                                      labels={'x': 'Количество ингредиентов', 'y': 'Количество рецептов'})
-                    st.plotly_chart(fig2, use_container_width=True)
-        
-    except Exception as e:
-        st.error(f"Ошибка при аналитике: {e}")
+    st.header("Сравнение коллекций")
+    st.caption("Один запрос — результаты из двух коллекций рядом")
 
+    col_a, col_b = st.columns(2)
+    with col_a:
+        coll_1 = st.selectbox("Коллекция 1:", collection_names, index=0, key="cmp_c1")
+    with col_b:
+        idx2 = min(1, len(collection_names) - 1)
+        coll_2 = st.selectbox("Коллекция 2:", collection_names, index=idx2, key="cmp_c2")
+
+    cmp_query = st.text_area("Запрос:", "водка с померанцевой коркой", height=80, key="cmp_query")
+    cmp_mode = st.radio("Режим:", ["hybrid", "dense", "sparse"], horizontal=True, key="cmp_mode",
+                        format_func=lambda x: {"hybrid": "Гибридный", "dense": "Dense", "sparse": "Sparse"}[x])
+
+    if st.button("⚖️ Сравнить", type="primary", use_container_width=True, key="cmp_go"):
+        if not embedder:
+            st.error("Embedder не инициализирован")
+        else:
+            with st.spinner("Поиск..."):
+                emb = embedder.get_embedding_full(cmp_query)
+
+                r1, t1 = do_search(coll_1, emb, cmp_mode, limit, score_threshold)
+                r2, t2 = do_search(coll_2, emb, cmp_mode, limit, score_threshold)
+
+                c1, c2 = st.columns(2)
+                with c1:
+                    st.subheader(f"{coll_1} ({t1:.2f}с)")
+                    if r1:
+                        st.dataframe(results_to_df(r1), use_container_width=True, hide_index=True)
+                    else:
+                        st.warning("Пусто")
+                with c2:
+                    st.subheader(f"{coll_2} ({t2:.2f}с)")
+                    if r2:
+                        st.dataframe(results_to_df(r2), use_container_width=True, hide_index=True)
+                    else:
+                        st.warning("Пусто")
+
+# === TAB 3: Сравнение режимов ===
 with tab3:
+    st.header("Сравнение режимов поиска")
+    st.caption("Один запрос — dense vs sparse vs hybrid")
+
+    modes_coll = st.selectbox("Коллекция:", collection_names, key="modes_coll")
+    modes_query = st.text_area("Запрос:", "перегонка через куб с травами", height=80, key="modes_query")
+
+    if st.button("📊 Сравнить режимы", type="primary", use_container_width=True, key="modes_go"):
+        if not embedder:
+            st.error("Embedder не инициализирован")
+        else:
+            with st.spinner("Поиск..."):
+                emb = embedder.get_embedding_full(modes_query)
+
+                rd, td = do_search(modes_coll, emb, "dense", limit, score_threshold)
+                rs, ts = do_search(modes_coll, emb, "sparse", limit, 0.0) if emb.sparse else ([], 0)
+                rh, th = do_search(modes_coll, emb, "hybrid", limit, 0.0) if emb.sparse else ([], 0)
+
+                c1, c2, c3 = st.columns(3)
+                with c1:
+                    st.subheader(f"Dense ({td:.2f}с)")
+                    st.dataframe(results_to_df(rd), use_container_width=True, hide_index=True) if rd else st.warning("Пусто")
+                with c2:
+                    st.subheader(f"Sparse ({ts:.2f}с)")
+                    st.dataframe(results_to_df(rs), use_container_width=True, hide_index=True) if rs else st.warning("Пусто / нет sparse")
+                with c3:
+                    st.subheader(f"Hybrid RRF ({th:.2f}с)")
+                    st.dataframe(results_to_df(rh), use_container_width=True, hide_index=True) if rh else st.warning("Пусто / нет sparse")
+
+# === TAB 4: Тесты ===
+with tab4:
     st.header("Автоматические тесты")
-    
-    # Подразделы для управления тестами
-    test_tab1, test_tab2 = st.tabs(["📋 Управление тестами", "▶️ Запуск тестов"])
-    
+
+    test_tab1, test_tab2 = st.tabs(["📋 Управление тестами", "▶️ Запуск"])
+
+    base_dir = os.path.dirname(os.path.abspath(__file__))
+    tests_file = os.path.join(base_dir, '..', 'tests.json')
+
+    try:
+        from test_manager import TestManager, TestCase
+        from datetime import datetime
+
+        test_manager = TestManager(tests_file=tests_file)
+    except ImportError as e:
+        st.error(f"test_manager не найден: {e}")
+        test_manager = None
+
     with test_tab1:
-        st.subheader("Создание и редактирование тестов")
-        
-        # Импортируем менеджер тестов
-        import sys
-        import os
-        base_dir = os.path.dirname(os.path.abspath(__file__))
-        sys.path.insert(0, os.path.join(base_dir, '..'))
-        
-        try:
-            from test_manager import TestManager, TestCase
-            from datetime import datetime
-            
-            tests_file = os.path.join(base_dir, '..', 'tests.json')
-            test_manager = TestManager(tests_file=tests_file)
-            
-            # Форма создания нового теста
-            with st.expander("➕ Создать новый тест", expanded=False):
-                with st.form("new_test_form"):
-                    test_name = st.text_input("Название теста*", placeholder="Например: Поиск рецепта водки из картофеля")
-                    test_query = st.text_area("Поисковый запрос*", placeholder="Введите запрос для тестирования поиска", height=100)
-                    col1, col2 = st.columns(2)
-                    with col1:
-                        expected_id = st.text_input("Ожидаемый ID результата", placeholder="vodka_potato_tech")
-                        max_rank = st.number_input("Максимальная позиция", min_value=1, max_value=20, value=3)
-                    with col2:
-                        expected_ids_str = st.text_input("Или список ID (через запятую)", placeholder="id1, id2, id3")
-                        min_score = st.number_input("Минимальный score", min_value=0.0, max_value=1.0, value=0.3, step=0.05)
-                    description = st.text_area("Описание (опционально)", placeholder="Дополнительная информация о тесте")
-                    
-                    submitted = st.form_submit_button("💾 Сохранить тест", type="primary")
-                    
-                    if submitted:
-                        if not test_name or not test_query:
-                            st.error("Пожалуйста, заполните название и запрос")
+        if test_manager:
+            with st.expander("➕ Создать тест", expanded=False):
+                with st.form("new_test"):
+                    t_name = st.text_input("Название*")
+                    t_query = st.text_area("Запрос*", height=80)
+                    c1, c2 = st.columns(2)
+                    with c1:
+                        t_id = st.text_input("Ожидаемый ID")
+                        t_rank = st.number_input("Макс. позиция", 1, 20, 3)
+                    with c2:
+                        t_ids = st.text_input("Или список ID (через запятую)")
+                        t_score = st.number_input("Мин. score", 0.0, 1.0, 0.3, 0.05)
+                    t_mode = st.selectbox("Режим поиска", ["hybrid", "dense", "sparse"])
+                    t_collection = st.text_input("Коллекция (пусто = из сайдбара)")
+                    t_desc = st.text_area("Описание")
+
+                    if st.form_submit_button("💾 Сохранить"):
+                        if not t_name or not t_query:
+                            st.error("Заполните название и запрос")
                         else:
-                            expected_ids = None
-                            if expected_ids_str:
-                                expected_ids = [id.strip() for id in expected_ids_str.split(',') if id.strip()]
-                            
+                            ids_list = [x.strip() for x in t_ids.split(',') if x.strip()] if t_ids else None
                             new_test = TestCase(
-                                id="",
-                                name=test_name,
-                                query=test_query,
-                                expected_result_id=expected_id if expected_id else None,
-                                expected_result_ids=expected_ids if expected_ids else None,
-                                max_rank=max_rank,
-                                min_score=min_score,
-                                description=description
+                                id="", name=t_name, query=t_query,
+                                expected_result_id=t_id or None,
+                                expected_result_ids=ids_list,
+                                max_rank=t_rank, min_score=t_score,
+                                search_mode=t_mode,
+                                collection=t_collection or None,
+                                description=t_desc
                             )
-                            
                             if test_manager.add_test(new_test):
-                                st.success(f"✅ Тест '{test_name}' успешно создан!")
+                                st.success(f"✅ Тест '{t_name}' создан")
                                 st.rerun()
-                            else:
-                                st.error("Ошибка: тест с таким ID уже существует")
-            
-            # Список существующих тестов
-            st.subheader("📝 Существующие тесты")
+
             tests = test_manager.get_all_tests()
-            
             if not tests:
-                st.info("Пока нет созданных тестов. Создайте первый тест выше.")
+                st.info("Нет тестов. Создайте первый.")
             else:
-                for i, test in enumerate(tests):
-                    with st.expander(f"🔍 {test.name} (ID: {test.id})", expanded=False):
-                        col1, col2 = st.columns([3, 1])
-                        with col1:
-                            st.write(f"**Запрос:** {test.query}")
-                            if test.expected_result_id:
-                                st.write(f"**Ожидаемый ID:** `{test.expected_result_id}`")
-                            if test.expected_result_ids:
-                                st.write(f"**Ожидаемые ID:** {', '.join(test.expected_result_ids)}")
-                            st.write(f"**Макс. позиция:** {test.max_rank}, **Мин. score:** {test.min_score}")
-                            if test.description:
-                                st.write(f"**Описание:** {test.description}")
-                            if test.created_at:
-                                st.caption(f"Создан: {test.created_at}")
-                        with col2:
-                            if st.button("🗑️ Удалить", key=f"delete_{test.id}"):
-                                if test_manager.delete_test(test.id):
-                                    st.success("Тест удален")
-                                    st.rerun()
-                                else:
-                                    st.error("Ошибка при удалении")
-        
-        except ImportError as e:
-            st.error(f"Не удалось импортировать test_manager: {e}")
-            st.info("Убедитесь, что файл test_manager.py находится в корне проекта")
-        except Exception as e:
-            st.error(f"Ошибка при работе с тестами: {e}")
-            import traceback
-            st.code(traceback.format_exc())
-    
+                st.subheader(f"📝 Тесты ({len(tests)})")
+                for t in tests:
+                    with st.expander(f"🔍 {t.name} [{t.search_mode}]"):
+                        st.write(f"**Запрос:** {t.query}")
+                        st.write(f"**Ожидаемый ID:** `{t.expected_result_id or '-'}`")
+                        if t.expected_result_ids:
+                            st.write(f"**Или ID:** {', '.join(t.expected_result_ids)}")
+                        st.write(f"**Макс. позиция:** {t.max_rank}, **Мин. score:** {t.min_score}")
+                        if t.collection:
+                            st.write(f"**Коллекция:** {t.collection}")
+                        if t.description:
+                            st.write(f"**Описание:** {t.description}")
+                        if st.button("🗑️ Удалить", key=f"del_{t.id}"):
+                            test_manager.delete_test(t.id)
+                            st.rerun()
+
     with test_tab2:
-        st.subheader("Запуск тестов")
-        
-        # Импортируем менеджер тестов для выбора
-        import sys
-        import os
-        base_dir = os.path.dirname(os.path.abspath(__file__))
-        sys.path.insert(0, os.path.join(base_dir, '..'))
-        
-        try:
-            from test_manager import TestManager
-            
-            tests_file = os.path.join(base_dir, '..', 'tests.json')
-            test_manager = TestManager(tests_file=tests_file)
-            all_tests = test_manager.get_all_tests()
-            
-            if not all_tests:
-                st.warning("⚠️ Нет созданных тестов. Перейдите на вкладку 'Управление тестами' для создания тестов.")
+        if test_manager:
+            tests = test_manager.get_all_tests()
+            if not tests:
+                st.warning("Нет тестов")
             else:
-                # Выбор тестов для запуска
-                test_options = {f"{t.name} ({t.id})": t.id for t in all_tests}
-                selected_test_names = st.multiselect(
-                    "Выберите тесты для запуска (оставьте пустым для запуска всех):",
-                    options=list(test_options.keys()),
-                    default=[]
-                )
-                
-                selected_test_ids = [test_options[name] for name in selected_test_names] if selected_test_names else None
-                
-                col1, col2 = st.columns(2)
-                with col1:
-                    run_all = st.button("🚀 Запустить все тесты", type="primary", use_container_width=True)
-                with col2:
-                    run_selected = st.button("▶️ Запустить выбранные", type="secondary", use_container_width=True, disabled=not selected_test_ids)
-                
-                if run_all or run_selected:
-                    with st.spinner("Выполняю тесты..."):
-                        # Импортируем новый тестер
-                        import importlib.util
-                        runner_path = None
-                        for rel in ['../qdrant_test_scripts', '../qdrant-search-tester/qdrant_test_scripts']:
-                            candidate = os.path.normpath(os.path.join(base_dir, rel, 'test-runner-v2.py'))
-                            if os.path.isfile(candidate):
-                                runner_path = candidate
-                                break
-                        
-                        if not runner_path:
-                            runner_path = os.path.normpath(os.path.join(base_dir, '..', 'qdrant_test_scripts', 'test-runner-v2.py'))
-                        
-                        try:
-                            spec = importlib.util.spec_from_file_location("test_runner_v2", runner_path)
-                            test_runner_v2 = importlib.util.module_from_spec(spec)
-                            spec.loader.exec_module(test_runner_v2)
-                            QdrantTesterV2 = test_runner_v2.QdrantTesterV2
-                            
-                            tester = QdrantTesterV2(tests_file=tests_file)
-                            test_ids_to_run = selected_test_ids if run_selected else None
-                            results = tester.run_tests(test_ids=test_ids_to_run)
-                            
-                            # Отображаем результаты
-                            st.success("✅ Тесты завершены!")
-                            
-                            # Сводка
-                            summary = results['summary']
-                            col1, col2, col3, col4 = st.columns(4)
-                            with col1:
-                                st.metric("Всего тестов", summary['total_tests'])
-                            with col2:
-                                st.metric("Успешно", summary['total_passed'], delta=f"{results['success_rate']:.1f}%")
-                            with col3:
-                                st.metric("С предупреждениями", summary['total_warning'])
-                            with col4:
-                                st.metric("Неудачно", summary['total_failed'])
-                            
-                            # Детальные результаты
-                            st.subheader("📊 Детальные результаты")
-                            for result in results['detailed_results']:
-                                status_icon = "✅" if result['status'] == 'PASSED' else "⚠️" if result['status'] == 'WARNING' else "❌"
-                                with st.expander(f"{status_icon} {result['test_name']} - {result['status']}", expanded=False):
-                                    st.write(f"**Запрос:** {result['query']}")
-                                    st.write(f"**Результат:** {result['message']}")
-                                    st.write(f"**Позиция:** {result['rank']}, **Score:** {result['score']}")
-                                    if result['found_id'] != 'N/A':
-                                        st.write(f"**Найденный ID:** `{result['found_id']}`")
-                                    if result['expected_ids']:
-                                        st.write(f"**Ожидались ID:** {', '.join(result['expected_ids'])}")
-                                    
-                                    # Топ-5 результатов
-                                    if result['top_results']:
-                                        st.write("**Топ-5 результатов поиска:**")
-                                        top_df = pd.DataFrame(result['top_results'])
-                                        st.dataframe(top_df, use_container_width=True, hide_index=True)
-                                    
-                        except FileNotFoundError:
-                            st.error(f"❌ Файл test-runner-v2.py не найден по пути: {runner_path}")
-                            st.info("Убедитесь, что файл test-runner-v2.py находится в директории qdrant_test_scripts")
-                        except Exception as e:
-                            st.error(f"Ошибка при выполнении тестов: {e}")
-                            import traceback
-                            with st.expander("Детали ошибки"):
-                                st.code(traceback.format_exc())
-        
-        except ImportError as e:
-            st.error(f"Не удалось импортировать test_manager: {e}")
-            st.info("Убедитесь, что файл test_manager.py находится в корне проекта")
-        except Exception as e:
-            st.error(f"Ошибка при работе с тестами: {e}")
-            import traceback
-            st.code(traceback.format_exc())
+                test_opts = {f"{t.name} [{t.search_mode}]": t.id for t in tests}
+                selected = st.multiselect("Выбрать тесты (пусто = все):", list(test_opts.keys()))
+                sel_ids = [test_opts[n] for n in selected] if selected else None
 
-# Раздел "Данные" временно скрыт
-# with tab4:
-#     st.header("Просмотр данных")
-#     
-#     # Показываем все рецепты
-#     st.subheader("Все рецепты в базе")
-#     st.dataframe(recipes_df, use_container_width=True)
-#     
-#     # Выбор рецепта для детального просмотра
-#     selected_recipe_id = st.selectbox(
-#         "Выберите рецепт для детального просмотра:",
-#         recipes_df['ID'].tolist()
-#     )
-#     
-#     if selected_recipe_id:
-#         recipe = next(r for r in recipes if r['id'] == selected_recipe_id)
-#         
-#         col1, col2 = st.columns([2, 1])
-#         
-#         with col1:
-#             st.subheader(recipe['name'])
-#             st.write(f"**Категория:** {recipe['category']}")
-#             st.write(f"**Описание:** {recipe['preparation']['description']}")
-#             
-#             # Ингредиенты
-#             st.markdown("**Ингредиенты:**")
-#             for ing in recipe['ingredients']:
-#                 st.write(f"- {ing['name']}: {ing.get('amount', '?')} {ing.get('unit', '')} {ing.get('notes', '')}")
-#             
-#             # Процесс
-#             st.markdown("**Процесс приготовления:**")
-#             for step in recipe['process']:
-#                 st.write(f"{step['step']}. **{step['action']}**: {step['description']}")
-#         
-#         with col2:
-#             # Sparse vectors
-#             if 'sparse_vectors' in recipe:
-#                 st.markdown("**Ключевые слова для поиска:**")
-#                 for category, vectors in recipe['sparse_vectors'].items():
-#                     with st.expander(f"{category}"):
-#                         top_terms = sorted(vectors.items(), key=lambda x: x[1], reverse=True)[:10]
-#                         for term, weight in top_terms:
-#                             st.progress(weight, text=f"{term}: {weight:.2f}")
-#             
-#             # Статистика
-#             st.markdown("**Статистика:**")
-#             st.write(f"Ингредиентов: {len(recipe['ingredients'])}")
-#             st.write(f"Шагов процесса: {len(recipe['process'])}")
-#             st.write(f"Примечаний: {len(recipe['notes'])}")
+                if st.button("🚀 Запустить", type="primary", use_container_width=True):
+                    if not embedder:
+                        st.error("Embedder не инициализирован")
+                    else:
+                        run_tests = [t for t in tests if sel_ids is None or t.id in sel_ids]
+                        progress = st.progress(0)
+                        results_list = []
+                        total_p, total_w, total_f = 0, 0, 0
 
-# Футер
+                        for idx, tc in enumerate(run_tests):
+                            progress.progress((idx + 1) / len(run_tests))
+                            coll = tc.collection or collection
+                            mode = tc.search_mode or "hybrid"
+
+                            try:
+                                emb = embedder.get_embedding_full(tc.query)
+                                hits, elapsed = do_search(coll, emb, mode, 10, 0.0)
+
+                                expected_ids = []
+                                if tc.expected_result_id:
+                                    expected_ids.append(tc.expected_result_id)
+                                if tc.expected_result_ids:
+                                    expected_ids.extend(tc.expected_result_ids)
+
+                                found_rank = None
+                                found_score = 0.0
+                                found_id = None
+                                for rank, hit in enumerate(hits, 1):
+                                    hit_id = hit.payload.get('recipe_id', hit.payload.get('id'))
+                                    if hit_id in expected_ids:
+                                        found_rank = rank
+                                        found_score = hit.score
+                                        found_id = hit_id
+                                        break
+
+                                if found_rank is None:
+                                    status = "FAILED"
+                                    total_f += 1
+                                elif found_rank > tc.max_rank:
+                                    status = "WARNING"
+                                    total_w += 1
+                                elif found_score < tc.min_score:
+                                    status = "WARNING"
+                                    total_w += 1
+                                else:
+                                    status = "PASSED"
+                                    total_p += 1
+
+                                results_list.append({
+                                    "Тест": tc.name,
+                                    "Режим": mode,
+                                    "Статус": {"PASSED": "✅", "WARNING": "⚠️", "FAILED": "❌"}[status],
+                                    "Позиция": found_rank or "-",
+                                    "Score": f"{found_score:.4f}" if found_score else "-",
+                                    "Найден ID": found_id or "-",
+                                    "Ожидали": ", ".join(expected_ids),
+                                    "Время": f"{elapsed:.2f}с",
+                                    "Топ-1": hits[0].payload.get('recipe_name', hits[0].payload.get('name', '?')) if hits else "-",
+                                })
+                            except Exception as e:
+                                total_f += 1
+                                results_list.append({
+                                    "Тест": tc.name, "Режим": mode,
+                                    "Статус": "❌", "Позиция": "-", "Score": "-",
+                                    "Найден ID": "-", "Ожидали": "-",
+                                    "Время": "-", "Топ-1": str(e)[:50],
+                                })
+
+                        progress.empty()
+
+                        c1, c2, c3 = st.columns(3)
+                        c1.metric("✅ Passed", total_p)
+                        c2.metric("⚠️ Warning", total_w)
+                        c3.metric("❌ Failed", total_f)
+
+                        st.dataframe(pd.DataFrame(results_list), use_container_width=True, hide_index=True)
+
+# --- Footer ---
 st.markdown("---")
-st.caption("🔍 Qdrant Search Test Dashboard • Тестовая среда для проверки поиска")
+st.caption("🔍 Qdrant Search Tester • Hybrid search testing for BGE-M3 + Qdrant")
